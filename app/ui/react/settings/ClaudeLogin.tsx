@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { assistantApi, isRunnerUnavailable } from '../lib/api'
-import type { AssistantStatus, AuthLastResult, AuthStart } from '../lib/api'
+import type { AssistantStatus, AuthLastResult, AuthStart, AuthVerify } from '../lib/api'
 import { runnerIsUp } from '../lib/status'
 import { Badge, Button, Card, ErrorBox, Icon, NoticeBox } from '../shared'
 
@@ -15,7 +15,8 @@ export default function ClaudeLogin({ status, onChanged }: { status: AssistantSt
   const { t } = useTranslation('ai_assistant')
   const [start, setStart] = useState<AuthStart | null>(null)
   const [code, setCode] = useState('')
-  const [busy, setBusy] = useState<'start' | 'submit' | null>(null)
+  const [busy, setBusy] = useState<'start' | 'submit' | 'verify' | null>(null)
+  const [verified, setVerified] = useState<AuthVerify | null | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
@@ -30,6 +31,7 @@ export default function ClaudeLogin({ status, onChanged }: { status: AssistantSt
     try {
       const s = await assistantApi.authStatus()
       setPending(!!s.pending)
+      setVerified(s.verified ?? null)
       // Bridge: `authenticated` is the detected credential kind ("none" when absent);
       // plugin fallback while the runner is down: the configured auth mode → unknown.
       const a = s.authenticated
@@ -120,6 +122,21 @@ export default function ClaudeLogin({ status, onChanged }: { status: AssistantSt
 
   const cancel = () => { setStart(null); setCode(''); setError(null) }
 
+  /** One tiny headless turn in the runner — the only proof the credential works. */
+  const verify = async () => {
+    setBusy('verify')
+    setError(null)
+    try {
+      const v = await assistantApi.authVerify()
+      setVerified(v)
+      if (!v.ok) setError(t('login.verifyFailed', { defaultValue: 'The credential does not work: {{error}}', error: v.error || '?' }))
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const modeLabel = authMode === 'oauth'
     ? t('login.modeOauth', { defaultValue: 'Claude subscription (OAuth token)' })
     : authMode === 'api_key'
@@ -134,8 +151,15 @@ export default function ClaudeLogin({ status, onChanged }: { status: AssistantSt
         {t('login.body', { defaultValue: 'Sign in with a Claude Pro/Max subscription: the runner opens a Claude login, you confirm it in the browser and paste the code shown there. The resulting long-lived token is stored in Vault (plugin setting claude_oauth_token). An API key can be stored in the plugin settings instead.' })}
       </p>
       {authenticated === true && authMode !== 'none' && !start && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.78rem', color: 'var(--lx-state-up)' }}>
-          <Icon name="verified" size={16} />{t('login.runnerAuthenticated', { defaultValue: 'The runner reports a valid Claude login.' })}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.78rem', flexWrap: 'wrap',
+          color: verified?.ok ? 'var(--lx-state-up)' : verified && !verified.ok ? 'var(--lx-state-down)' : 'var(--lx-text-muted)' }}>
+          <Icon name={verified?.ok ? 'verified' : verified && !verified.ok ? 'error_outline' : 'key'} size={16} />
+          {verified?.ok
+            ? t('login.verifiedOk', { defaultValue: 'Verified: the credential works (checked {{at}}).', at: verified.at ? new Date(verified.at).toLocaleTimeString() : '' })
+            : verified && !verified.ok
+              ? t('login.verifiedBad', { defaultValue: 'A credential is configured but it does not work — sign in again.' })
+              : t('login.runnerConfigured', { defaultValue: 'A credential is configured in the runner (not verified yet).' })}
+          <Button icon="fact_check" label={t('login.verify', { defaultValue: 'Verify login' })} onClick={() => void verify()} busy={busy === 'verify'} disabled={!runnerUp} />
         </div>
       )}
       {authenticated === false && authMode !== 'none' && !start && (

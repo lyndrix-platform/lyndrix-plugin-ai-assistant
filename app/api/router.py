@@ -126,6 +126,15 @@ def build_router() -> APIRouter:
         ai_service.start_login_finisher(payload.auth_id, by=identity.username)
         return {"accepted": True, "auth_id": payload.auth_id}
 
+    @router.post("/auth/verify")
+    async def auth_verify(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+        """Real check of the configured credential: one tiny headless turn in the runner."""
+        _require_runner()
+        try:
+            return await ai_service.bridge()._call("POST", "/auth/verify", timeout=100)
+        except BridgeError as exc:
+            raise _bridge_http(exc) from exc
+
     @router.delete("/auth/{auth_id}")
     async def auth_cancel(auth_id: str, _identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
         """Abort a pending login (the CLI process is terminated; a new one can start)."""

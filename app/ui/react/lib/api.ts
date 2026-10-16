@@ -123,9 +123,18 @@ export interface AuthLastResult {
   at?: string
 }
 
+/** Outcome of a real credential check (one headless turn in the runner). */
+export interface AuthVerify {
+  ok: boolean
+  error?: string | null
+  at?: string
+}
+
 export interface AuthStatus {
   pending: boolean
   auth_id?: string
+  /** last real check of the configured credential (bridge memory) */
+  verified?: AuthVerify | null
   /** awaiting_code | exchanging | done | failed (bridge flow phase) */
   phase?: string
   /** the credential kind the bridge detects ("none" when absent); the auth *mode* string when the runner is down. */
@@ -247,6 +256,7 @@ export const assistantApi = {
   // Exchanging the code can take a while (CLI → Anthropic); never give up before the backend does.
   authSubmit: (auth_id: string, code: string) => pluginApi.post<AuthSubmitOut>('auth/submit', { auth_id, code }, 45_000),
   authStatus: () => pluginApi.get<AuthStatus>('auth/status'),
+  authVerify: () => pluginApi.post<AuthVerify>('auth/verify', undefined, 110_000),
 
   // Sessions
   listSessions: (opts: { all?: boolean; archived?: boolean } = {}) => {

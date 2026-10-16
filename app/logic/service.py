@@ -264,7 +264,14 @@ class AiAssistantService:
                 if res.get("ok") and res.get("token"):
                     self.login_last = {"ok": True, "auth_id": auth_id, "phase": "storing", "at": _utcnow().isoformat()}
                     await self.store_oauth_token(str(res["token"]), by=by)
-                    self.login_last = {"ok": True, "auth_id": auth_id, "phase": "done", "at": _utcnow().isoformat()}
+                    # The runner was recreated with the token: prove it works end to end.
+                    verified = None
+                    try:
+                        verified = await self.bridge()._call("POST", "/auth/verify", timeout=100)
+                    except BridgeError as exc:
+                        log.warning(f"Login finisher: verification unavailable — {exc.detail}")
+                    self.login_last = {"ok": True, "auth_id": auth_id, "phase": "done", "verified": verified,
+                                       "at": _utcnow().isoformat()}
                 else:
                     err = str(res.get("error") or "sign-in failed")
                     log.warning(f"Login finisher: exchange failed — {err[:400]}")

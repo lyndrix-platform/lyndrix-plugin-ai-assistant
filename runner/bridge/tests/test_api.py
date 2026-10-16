@@ -198,7 +198,7 @@ async def test_auth_status_without_flow(client, monkeypatch):
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     body = (await client.get("/auth/status")).json()
-    assert body == {"pending": False, "authenticated": "none"}
+    assert body["pending"] is False and body["authenticated"] == "none" and body["verified"] is None
     assert (await client.delete("/auth/whatever")).status_code == 404
     r = await client.post("/auth/start")
     assert r.status_code == 502 and "not found" in r.json()["detail"]

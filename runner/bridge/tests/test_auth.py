@@ -61,6 +61,14 @@ sys.exit(1)
 '''
 
 
+async def _ok(token: str):
+    return True, None
+
+
+async def _bad(token: str):
+    return False, "401 OAuth access token is invalid"
+
+
 @pytest.fixture
 def fake_cli(tmp_path: Path):
     def make(mode: str = "normal") -> str:
@@ -85,7 +93,7 @@ async def _outcome(flows, auth_id, timeout=10.0):
 async def test_start_submit_bad_then_good(fake_cli):
     from bridge.auth import AuthFlowNotReady
 
-    flows = AuthFlowManager(fake_cli(), url_timeout=10, submit_timeout=10)
+    flows = AuthFlowManager(fake_cli(), url_timeout=10, submit_timeout=10, verifier=_ok)
     started = await flows.start()
     assert started["url"].startswith("https://claude.com/cai/oauth/authorize?code=true")
     assert started["expires_in"] == 600 and started["auth_id"]
@@ -123,7 +131,7 @@ async def test_start_submit_bad_then_good(fake_cli):
 
 
 async def test_failed_outcome_is_visible_in_status_until_claimed(fake_cli):
-    flows = AuthFlowManager(fake_cli(), url_timeout=10, submit_timeout=10)
+    flows = AuthFlowManager(fake_cli(), url_timeout=10, submit_timeout=10, verifier=_ok)
     started = await flows.start()
     await flows.submit(started["auth_id"], "nope")
     for _ in range(200):
@@ -186,8 +194,27 @@ def test_clean_url_cuts_glued_hint_text():
 
 
 async def test_enter_is_sent_separately_for_paste_detection(fake_cli):
-    flows = AuthFlowManager(fake_cli("paste"), url_timeout=10, submit_timeout=10, enter_delay=0.2, nudge_after=2)
+    flows = AuthFlowManager(fake_cli("paste"), url_timeout=10, submit_timeout=10, enter_delay=0.2, nudge_after=2, verifier=_ok)
     started = await flows.start()
     await flows.submit(started["auth_id"], "good-code")
     outcome = await _outcome(flows, started["auth_id"], timeout=12)
     assert outcome == {"ok": True, "token": FAKE_TOKEN}
+
+
+async def test_token_that_fails_validation_is_not_handed_out(fake_cli):
+    flows = AuthFlowManager(fake_cli(), url_timeout=10, submit_timeout=10, verifier=_bad)
+    started = await flows.start()
+    await flows.submit(started["auth_id"], "good-code")
+    outcome = await _outcome(flows, started["auth_id"])
+    assert outcome["ok"] is False and "did not validate" in outcome["error"] and "401" in outcome["error"]
+    assert FAKE_TOKEN not in outcome["error"]          # scrubbed
+
+
+def test_strip_ansi_turns_cursor_moves_into_line_breaks():
+    from bridge.auth import TOKEN_RE, strip_ansi
+
+    # ink draws the next hint with a cursor-down + column move instead of "\n"
+    raw = (b"Your token:\x1b[1B\x1b[1G" + FAKE_TOKEN.encode() + b"\x1b[1B\x1b[1GStore this token securely.\x1b[0m")
+    text = strip_ansi(raw)
+    assert TOKEN_RE.search(text).group(0) == FAKE_TOKEN
+    assert "Store this token" in text and FAKE_TOKEN + "Store" not in text

@@ -209,6 +209,11 @@ def create_app(
     async def auth_status() -> dict[str, Any]:
         return auth_flows.status()
 
+    @app.post("/auth/verify", dependencies=guarded)
+    async def auth_verify() -> dict[str, Any]:
+        """Real check of the configured credential (one tiny headless turn)."""
+        return await auth_flows.verify_current()
+
     @app.delete("/auth/{auth_id}", dependencies=guarded)
     async def auth_cancel(auth_id: str) -> dict[str, Any]:
         if not await auth_flows.cancel(auth_id):

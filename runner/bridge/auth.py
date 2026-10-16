@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import logging
+import json
 import os
 import pty
 import re
@@ -27,7 +28,7 @@ import termios
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Awaitable
 
 from .config import detect_auth
 
@@ -67,8 +68,19 @@ class AuthFlowNotReady(AuthFlowError):
     """The code was submitted but the CLI has not finished the exchange yet."""
 
 
+# Cursor movements the TUI uses instead of newlines (cursor down/next line/position/
+# erase). Turning them into a line break keeps values from being glued to the text
+# the renderer draws on the next line (seen live: the state parameter of the URL and
+# the token both got a hint sentence appended).
+_CURSOR_BREAK_RE = re.compile(r"\x1b\[[0-9;]*[BEHfdJ]")
+_CURSOR_SPACE_RE = re.compile(r"\x1b\[[0-9;]*[CG]")
+
+
 def strip_ansi(raw: bytes) -> str:
-    return ANSI_RE.sub("", raw.decode("utf-8", "replace")).replace("\r", "")
+    text = raw.decode("utf-8", "replace")
+    text = _CURSOR_BREAK_RE.sub("\n", text)
+    text = _CURSOR_SPACE_RE.sub(" ", text)
+    return ANSI_RE.sub("", text).replace("\r", "")
 
 
 def scrub(text: str) -> str:
@@ -127,6 +139,7 @@ class AuthFlowManager:
         submit_timeout: float = 90.0,
         enter_delay: float = 0.4,
         nudge_after: float = 10.0,
+        verifier: "Callable[[str], Awaitable[tuple[bool, str | None]]] | None" = None,
     ) -> None:
         self._cli_path = cli_path
         self.expires_in = expires_in
@@ -134,6 +147,10 @@ class AuthFlowManager:
         self.submit_timeout = submit_timeout
         self.enter_delay = enter_delay
         self.nudge_after = nudge_after
+        # Validates a parsed token with a real request before it is handed out
+        # (default: a one-turn headless `claude -p`); tests inject a stub.
+        self._verifier = verifier if verifier is not None else self.verify_token
+        self.last_verify: dict[str, Any] | None = None
         self._flow: AuthFlow | None = None
         self._lock = asyncio.Lock()
 
@@ -147,7 +164,7 @@ class AuthFlowManager:
     def status(self) -> dict[str, Any]:
         kind, _ = detect_auth()
         flow = self.pending
-        out: dict[str, Any] = {"pending": flow is not None, "authenticated": kind}
+        out: dict[str, Any] = {"pending": flow is not None, "authenticated": kind, "verified": self.last_verify}
         if flow is not None:
             out.update(flow.to_status())
         return out
@@ -225,8 +242,17 @@ class AuthFlowManager:
             result: dict[str, Any] = {"ok": False, "error": f"no token within {int(self.submit_timeout)} s; output tail: {tail!r}"}
             log.warning("login flow timed out", extra={"ctx": {"auth_id": flow.auth_id, "tail": tail}})
         elif TOKEN_RE.fullmatch(match.group(0)):
-            result = {"ok": True, "token": match.group(0)}
-            log.info("login flow completed", extra={"ctx": {"auth_id": flow.auth_id}})
+            token = match.group(0)
+            tail = scrub(flow.text()[mark:][-300:])
+            ok, why = await self._verifier(token)
+            if ok:
+                result = {"ok": True, "token": token}
+                log.info("login flow completed", extra={"ctx": {"auth_id": flow.auth_id, "token_length": len(token)}})
+            else:
+                # The parsed text is not a working token (truncated / glued) — do not store it.
+                result = {"ok": False, "error": f"token parsed from the CLI output did not validate: {why}; output tail: {tail!r}"}
+                log.warning("login flow: parsed token failed validation",
+                            extra={"ctx": {"auth_id": flow.auth_id, "token_length": len(token), "why": why, "tail": tail}})
         else:
             error = scrub(match.group(0)).strip()
             result = {"ok": False, "error": error}
@@ -239,6 +265,46 @@ class AuthFlowManager:
             return
         flow.result = result
         flow.phase = "done" if result.get("ok") else "failed"
+
+    async def verify_token(self, token: str | None = None, timeout: float = 90.0) -> tuple[bool, str | None]:
+        """One tiny headless turn through the CLI: proves the credential works end to
+        end. ``token=None`` checks the container's configured credential."""
+        if not self._cli_path:
+            return False, "claude CLI not found"
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE",)}
+        if token:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+            env.pop("ANTHROPIC_API_KEY", None)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._cli_path, "-p", "Reply with exactly the word OK and nothing else.",
+                "--output-format", "json", "--max-turns", "1",
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, env=env, cwd=os.environ.get("LYNDRIX_AI_WORKSPACE", "/tmp"),
+            )
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            return False, f"no answer within {int(timeout)} s"
+        except OSError as exc:
+            return False, f"could not run the CLI: {exc}"
+        text = scrub(out.decode("utf-8", "replace") + err.decode("utf-8", "replace"))
+        try:
+            data = json.loads(out.decode("utf-8", "replace") or "{}")
+        except ValueError:
+            data = {}
+        if proc.returncode == 0 and isinstance(data, dict) and not data.get("is_error"):
+            return True, None
+        detail = (data.get("result") if isinstance(data, dict) else None) or text.strip()[-300:] or f"exit {proc.returncode}"
+        return False, str(detail)[:300]
+
+    async def verify_current(self) -> dict[str, Any]:
+        ok, why = await self.verify_token(None)
+        self.last_verify = {"ok": ok, "error": why, "at": _iso(datetime.now(tz=timezone.utc))}
+        return self.last_verify
 
     @staticmethod
     def _press_enter(flow: AuthFlow) -> None:

@@ -154,7 +154,12 @@
     "expired": "The sign-in request expired — start again.",
     "expiresIn": "Expires in {{seconds}} s",
     "exchanging": "The runner exchanges the code for a token and stores it — this can take up to two minutes.",
-    "exchangeTimeout": "No outcome from the runner within 3 minutes — check the runner log and start again."
+    "exchangeTimeout": "No outcome from the runner within 3 minutes — check the runner log and start again.",
+    "verify": "Verify login",
+    "verifyFailed": "The credential does not work: {{error}}",
+    "verifiedOk": "Verified: the credential works (checked {{at}}).",
+    "verifiedBad": "A credential is configured but it does not work — sign in again.",
+    "runnerConfigured": "A credential is configured in the runner (not verified yet)."
   },
   "instructions": {
     "title": "Generated instructions (CLAUDE.md)",
