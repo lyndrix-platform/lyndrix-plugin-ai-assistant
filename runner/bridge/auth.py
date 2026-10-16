@@ -222,18 +222,23 @@ class AuthFlowManager:
             return
         if match is None:
             tail = scrub(flow.text()[mark:][-300:])
-            flow.result = {"ok": False, "error": f"no token within {int(self.submit_timeout)} s; output tail: {tail!r}"}
+            result: dict[str, Any] = {"ok": False, "error": f"no token within {int(self.submit_timeout)} s; output tail: {tail!r}"}
             log.warning("login flow timed out", extra={"ctx": {"auth_id": flow.auth_id, "tail": tail}})
         elif TOKEN_RE.fullmatch(match.group(0)):
-            flow.result = {"ok": True, "token": match.group(0)}
+            result = {"ok": True, "token": match.group(0)}
             log.info("login flow completed", extra={"ctx": {"auth_id": flow.auth_id}})
         else:
             error = scrub(match.group(0)).strip()
-            flow.result = {"ok": False, "error": error}
+            result = {"ok": False, "error": error}
             log.info("login flow failed", extra={"ctx": {"auth_id": flow.auth_id, "error": error}})
-        flow.phase = "done" if flow.result.get("ok") else "failed"
-        # The CLI is no longer needed; the outcome stays claimable until expiry.
+        # Stop the CLI first, then publish the outcome: a status that says "done" must
+        # never describe a flow whose process is still running. The outcome stays
+        # claimable until expiry.
         await self._stop_process(flow)
+        if flow.finished:
+            return
+        flow.result = result
+        flow.phase = "done" if result.get("ok") else "failed"
 
     @staticmethod
     def _press_enter(flow: AuthFlow) -> None:
