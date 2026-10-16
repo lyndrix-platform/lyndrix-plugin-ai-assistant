@@ -107,18 +107,31 @@ export interface AuthStart {
   expires_in: number
 }
 
+/** POST /auth/submit answers 202 at once; the exchange is followed server-side. */
 export interface AuthSubmitOut {
-  ok: boolean
-  restarting?: boolean
-  error?: string | null
+  accepted?: boolean
+  auth_id?: string
+}
+
+/** Outcome of the last code submission (plugin memory, survives the browser request). */
+export interface AuthLastResult {
+  ok: boolean | null
+  auth_id?: string
+  /** exchanging → storing → done | failed */
+  phase: 'exchanging' | 'storing' | 'done' | 'failed'
+  error?: string
+  at?: string
 }
 
 export interface AuthStatus {
   pending: boolean
   auth_id?: string
-  /** boolean from the bridge; the auth *mode* string when the runner is down. */
+  /** awaiting_code | exchanging | done | failed (bridge flow phase) */
+  phase?: string
+  /** the credential kind the bridge detects ("none" when absent); the auth *mode* string when the runner is down. */
   authenticated: boolean | string
   runner?: string
+  last_result?: AuthLastResult | null
 }
 
 /** Core: GET /api/me/access — server-derived effective permissions. */
@@ -232,7 +245,7 @@ export const assistantApi = {
   // The CLI needs a few seconds (sometimes >20 s) before it prints the login URL.
   authStart: () => pluginApi.post<AuthStart>('auth/start', undefined, 90_000),
   // Exchanging the code can take a while (CLI → Anthropic); never give up before the backend does.
-  authSubmit: (auth_id: string, code: string) => pluginApi.post<AuthSubmitOut>('auth/submit', { auth_id, code }, 130_000),
+  authSubmit: (auth_id: string, code: string) => pluginApi.post<AuthSubmitOut>('auth/submit', { auth_id, code }, 45_000),
   authStatus: () => pluginApi.get<AuthStatus>('auth/status'),
 
   // Sessions

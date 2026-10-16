@@ -111,20 +111,20 @@ def build_router() -> APIRouter:
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
 
-    @router.post("/auth/submit")
+    @router.post("/auth/submit", status_code=202)
     async def auth_submit(payload: AuthSubmit, identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+        """Hands the code to the CLI and returns at once; the exchange (up to 90 s)
+        is followed server-side and the token stored — poll ``/auth/status``
+        (``last_result``) instead of keeping one long request open through the proxies."""
         _require_runner()
         try:
-            # the bridge waits up to 90 s for the CLI to exchange the code for the token
-            result = await ai_service.bridge()._call(
-                "POST", "/auth/submit", json={"auth_id": payload.auth_id, "code": payload.code.strip()}, timeout=110,
+            await ai_service.bridge()._call(
+                "POST", "/auth/submit", json={"auth_id": payload.auth_id, "code": payload.code.strip()}, timeout=30,
             )
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
-        if isinstance(result, dict) and result.get("ok") and result.get("token"):
-            await ai_service.store_oauth_token(str(result["token"]), by=identity.username)
-            return {"ok": True, "restarting": True}
-        return {"ok": False, "error": (result or {}).get("error") if isinstance(result, dict) else "unknown"}
+        ai_service.start_login_finisher(payload.auth_id, by=identity.username)
+        return {"accepted": True, "auth_id": payload.auth_id}
 
     @router.delete("/auth/{auth_id}")
     async def auth_cancel(auth_id: str, _identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
@@ -138,11 +138,17 @@ def build_router() -> APIRouter:
     @router.get("/auth/status")
     async def auth_status(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
         if ai_service.runner is None or ai_service.runner.client is None:
-            return {"pending": False, "authenticated": ai_service.auth_mode(), "runner": "down"}
+            return {"pending": False, "authenticated": ai_service.auth_mode(), "runner": "down",
+                    "last_result": ai_service.login_last}
         try:
             data = await ai_service.bridge()._call("GET", "/auth/status")
         except BridgeError as exc:
+            # the runner is being recreated with the fresh token right after a login
+            if ai_service.login_last and ai_service.login_last.get("phase") in ("storing", "done"):
+                return {"pending": False, "authenticated": ai_service.auth_mode(), "runner": "restarting",
+                        "last_result": ai_service.login_last}
             raise _bridge_http(exc) from exc
+        data["last_result"] = ai_service.login_last
         return data
 
     # ------------------------------------------------------------------ sessions

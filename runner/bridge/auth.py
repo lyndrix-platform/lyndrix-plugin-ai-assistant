@@ -36,7 +36,7 @@ log = logging.getLogger("bridge.auth")
 URL_RE = re.compile(r"https://[A-Za-z0-9.\-]+/[^\s\"'<>]*oauth[^\s\"'<>]*")
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{20,}")
 ANY_TOKEN_RE = re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")
-ERROR_RE = re.compile(r"(OAuth error[^\n]*|Invalid code[^\n]*|Error:[^\n]*)")
+ERROR_RE = re.compile(r"(OAuth error[^\n]*|Invalid code[^\n]*|Error:[^\n]*|(?i:failed to [^\n]*|invalid[_ ]grant[^\n]*|expired[^\n]*|unauthori[sz]ed[^\n]*))")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=>]")
 # The ink renderer positions the hint lines after the URL with cursor moves, not
 # newlines, so after ANSI stripping the next hint ("Hold Shift while selecting…",
@@ -61,6 +61,10 @@ class AuthFlowPending(AuthFlowError):
 
 class AuthFlowNotFound(AuthFlowError):
     pass
+
+
+class AuthFlowNotReady(AuthFlowError):
+    """The code was submitted but the CLI has not finished the exchange yet."""
 
 
 def strip_ansi(raw: bytes) -> str:
@@ -88,18 +92,29 @@ class AuthFlow:
     eof: bool = False
     url: str | None = None
     expiry_task: asyncio.Task[None] | None = None
+    exchange_task: asyncio.Task[None] | None = None
     finished: bool = False
+    # awaiting_code → exchanging → done | failed. The outcome is kept until the
+    # plugin claims it (POST /auth/result) or the flow expires, so a slow
+    # exchange never depends on one long HTTP request surviving the proxies.
+    phase: str = "awaiting_code"
+    result: dict[str, Any] | None = None
 
     def text(self) -> str:
         return strip_ansi(bytes(self.buf))
 
     def to_status(self) -> dict[str, Any]:
-        return {
+        out = {
             "auth_id": self.auth_id,
             "started_at": _iso(self.started_at),
             "expires_at": _iso(self.expires_at),
             "url": self.url,
+            "phase": self.phase,
+            "result_available": self.result is not None,
         }
+        if self.result is not None and not self.result.get("ok"):
+            out["error"] = self.result.get("error")
+        return out
 
 
 class AuthFlowManager:
@@ -163,37 +178,55 @@ class AuthFlowManager:
             }
 
     async def submit(self, auth_id: str, code: str) -> dict[str, Any]:
+        """Hand the code to the CLI and return at once; the exchange runs in the
+        background and its outcome is read with :meth:`result` (``status()``
+        shows ``phase``/``result_available`` meanwhile)."""
         async with self._lock:
             flow = self._require(auth_id)
-            if flow.master_fd is None or flow.url is None:
-                raise AuthFlowError("flow is not ready for a code")
+            if flow.phase != "awaiting_code" or flow.master_fd is None or flow.url is None:
+                raise AuthFlowError(f"flow is not awaiting a code (phase {flow.phase})")
             mark = max(0, len(flow.text()) - 64)
             try:
                 os.write(flow.master_fd, (code.strip() + "\r").encode())
             except OSError as exc:
                 await self._terminate(flow)
-                return {"ok": False, "error": f"could not write code to the CLI: {exc}"}
+                raise AuthFlowError(f"could not write code to the CLI: {exc}") from exc
+            flow.phase = "exchanging"
+            flow.exchange_task = asyncio.create_task(self._exchange(flow, mark), name=f"auth-exchange:{flow.auth_id}")
+            return {"accepted": True, "auth_id": flow.auth_id}
 
-            def outcome(text: str) -> re.Match[str] | None:
-                tail = text[mark:]
-                return TOKEN_RE.search(tail) or ERROR_RE.search(tail)
+    async def _exchange(self, flow: AuthFlow, mark: int) -> None:
+        def outcome(text: str) -> re.Match[str] | None:
+            tail = text[mark:]
+            return TOKEN_RE.search(tail) or ERROR_RE.search(tail)
 
-            match = await self._wait_for(flow, outcome, self.submit_timeout)
-            try:
-                if match is None:
-                    tail = scrub(flow.text()[mark:][-300:])
-                    return {"ok": False, "error": f"no token within {int(self.submit_timeout)} s; output tail: {tail!r}"}
-                if TOKEN_RE.fullmatch(match.group(0)):
-                    token = match.group(0)
-                    log.info("login flow completed", extra={"ctx": {"auth_id": flow.auth_id}})
-                    return {"ok": True, "token": token}
-                error = scrub(match.group(0)).strip()
-                log.info("login flow failed", extra={"ctx": {"auth_id": flow.auth_id, "error": error}})
-                return {"ok": False, "error": error}
-            finally:
-                # Either way this flow is over; drop the buffer so no token
-                # lingers in memory and the next start() is clean.
-                await self._terminate(flow)
+        match = await self._wait_for(flow, outcome, self.submit_timeout)
+        if flow.finished:
+            return
+        if match is None:
+            tail = scrub(flow.text()[mark:][-300:])
+            flow.result = {"ok": False, "error": f"no token within {int(self.submit_timeout)} s; output tail: {tail!r}"}
+            log.warning("login flow timed out", extra={"ctx": {"auth_id": flow.auth_id, "tail": tail}})
+        elif TOKEN_RE.fullmatch(match.group(0)):
+            flow.result = {"ok": True, "token": match.group(0)}
+            log.info("login flow completed", extra={"ctx": {"auth_id": flow.auth_id}})
+        else:
+            error = scrub(match.group(0)).strip()
+            flow.result = {"ok": False, "error": error}
+            log.info("login flow failed", extra={"ctx": {"auth_id": flow.auth_id, "error": error}})
+        flow.phase = "done" if flow.result.get("ok") else "failed"
+        # The CLI is no longer needed; the outcome stays claimable until expiry.
+        await self._stop_process(flow)
+
+    async def result(self, auth_id: str) -> dict[str, Any]:
+        """The outcome of the exchange — the token is handed out exactly once."""
+        async with self._lock:
+            flow = self._require(auth_id)
+            if flow.result is None:
+                raise AuthFlowNotReady(auth_id)
+            res = flow.result
+            await self._terminate(flow)       # drops the flow and the token copy
+            return res
 
     async def cancel(self, auth_id: str | None = None) -> bool:
         flow = self.pending
@@ -290,8 +323,17 @@ class AuthFlowManager:
         if flow.finished:
             return
         flow.finished = True
+        flow.result = None
         if flow.expiry_task is not None and flow.expiry_task is not asyncio.current_task():
             flow.expiry_task.cancel()
+        if flow.exchange_task is not None and flow.exchange_task is not asyncio.current_task():
+            flow.exchange_task.cancel()
+        await self._stop_process(flow)
+        if self._flow is flow:
+            self._flow = None
+
+    async def _stop_process(self, flow: AuthFlow) -> None:
+        """Stop the CLI and drop its output buffer (the flow object stays)."""
         if flow.master_fd is not None:
             try:
                 asyncio.get_running_loop().remove_reader(flow.master_fd)
@@ -314,5 +356,3 @@ class AuthFlowManager:
                 except Exception:  # noqa: BLE001
                     pass
         flow.buf = bytearray()
-        if self._flow is flow:
-            self._flow = None

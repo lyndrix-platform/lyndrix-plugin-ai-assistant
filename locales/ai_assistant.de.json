@@ -152,7 +152,9 @@
     "codePlaceholder": "Autorisierungscode",
     "submit": "Code absenden",
     "expired": "Die Anmeldeanfrage ist abgelaufen — bitte erneut starten.",
-    "expiresIn": "Läuft ab in {{seconds}} s"
+    "expiresIn": "Läuft ab in {{seconds}} s",
+    "exchanging": "Der Runner tauscht den Code gegen ein Token und speichert es – das kann bis zu zwei Minuten dauern.",
+    "exchangeTimeout": "Keine Rückmeldung vom Runner innerhalb von 3 Minuten – Runner-Log prüfen und erneut starten."
   },
   "instructions": {
     "title": "Generierte Instruktionen (CLAUDE.md)",

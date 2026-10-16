@@ -56,25 +56,69 @@ def fake_cli(tmp_path: Path):
     return make
 
 
+async def _outcome(flows, auth_id, timeout=10.0):
+    """Poll like the plugin does: status until result_available, then claim it."""
+    for _ in range(int(timeout * 20)):
+        st = flows.status()
+        if st.get("auth_id") == auth_id and st.get("result_available"):
+            return await flows.result(auth_id)
+        await asyncio.sleep(0.05)
+    raise AssertionError("no outcome")
+
+
 async def test_start_submit_bad_then_good(fake_cli):
+    from bridge.auth import AuthFlowNotReady
+
     flows = AuthFlowManager(fake_cli(), url_timeout=10, submit_timeout=10)
     started = await flows.start()
     assert started["url"].startswith("https://claude.com/cai/oauth/authorize?code=true")
     assert started["expires_in"] == 600 and started["auth_id"]
     status = flows.status()
     assert status["pending"] is True and status["auth_id"] == started["auth_id"] and status["url"] == started["url"]
+    assert status["phase"] == "awaiting_code" and status["result_available"] is False
 
     with pytest.raises(AuthFlowPending):
         await flows.start()
 
-    outcome = await flows.submit(started["auth_id"], "nope")
+    accepted = await flows.submit(started["auth_id"], "nope")
+    assert accepted == {"accepted": True, "auth_id": started["auth_id"]}
+    assert flows.status()["phase"] == "exchanging"
+    with pytest.raises(AuthFlowError):           # a second code while exchanging
+        await flows.submit(started["auth_id"], "again")
+    outcome = await _outcome(flows, started["auth_id"])
     assert outcome["ok"] is False and "Invalid code" in outcome["error"]
-    assert flows.pending is None  # a failed submission ends the flow
+    assert flows.pending is None                 # claiming the outcome ends the flow
 
     started = await flows.start()
-    outcome = await flows.submit(started["auth_id"], "good-code")
+    await flows.submit(started["auth_id"], "good-code")
+    with pytest.raises((AuthFlowNotReady, AssertionError)):
+        # not finished yet (or already finished on a fast machine — then _outcome below works)
+        if not flows.status().get("result_available"):
+            await flows.result(started["auth_id"])
+        raise AssertionError
+    outcome = await _outcome(flows, started["auth_id"])
     assert outcome == {"ok": True, "token": FAKE_TOKEN}
     assert flows.pending is None and flows.status()["pending"] is False
+    # the token is handed out exactly once
+    from bridge.auth import AuthFlowNotFound
+
+    with pytest.raises(AuthFlowNotFound):
+        await flows.result(started["auth_id"])
+
+
+async def test_failed_outcome_is_visible_in_status_until_claimed(fake_cli):
+    flows = AuthFlowManager(fake_cli(), url_timeout=10, submit_timeout=10)
+    started = await flows.start()
+    await flows.submit(started["auth_id"], "nope")
+    for _ in range(200):
+        if flows.status().get("result_available"):
+            break
+        await asyncio.sleep(0.05)
+    st = flows.status()
+    assert st["phase"] == "failed" and "Invalid code" in st["error"] and st["pending"] is True
+    assert flows.pending.proc.returncode is not None   # CLI stopped, outcome kept
+    assert (await flows.result(started["auth_id"]))["ok"] is False
+    assert flows.pending is None
 
 
 async def test_cancel_and_unknown_ids(fake_cli):

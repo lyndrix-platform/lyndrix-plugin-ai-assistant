@@ -2,6 +2,11 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.1.4] - 2026-10-16
+### Changed
+- Login: the code exchange is asynchronous. `POST /auth/submit` answers 202, the runner exchanges the code in the background, the plugin claims the token once (`POST /auth/result`) and stores it; the UI polls `/auth/status` (`last_result`). Long requests through the load balancer were cut after about a minute ("Failed to fetch") and the one-time token was lost.
+- Bridge logs the scrubbed CLI output tail when no token appears and also recognises "failed to …", "invalid_grant", "expired" and "unauthorized" as failures.
+
 ## [0.1.3] - 2026-10-16
 ### Fixed
 - Runner: when the socket manager could not resolve the host path of the storage within 15 s the plugin fell back to the container path — Docker then created an empty directory on the host, the fingerprint flipped and the runner was recreated with a workspace without instructions. The lookup now waits 60 s and fails loudly (the watchdog retries); recreate log lines say what changed.

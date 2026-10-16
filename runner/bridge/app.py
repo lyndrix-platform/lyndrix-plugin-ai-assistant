@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .auth import AuthFlowError, AuthFlowManager, AuthFlowNotFound, AuthFlowPending
+from .auth import AuthFlowError, AuthFlowManager, AuthFlowNotFound, AuthFlowNotReady, AuthFlowPending
 from .claude_provider import PERMISSION_MODES, Provider, SessionSpec
 from .config import Settings, detect_auth
 from .policy import Policy, PolicyError
@@ -84,6 +84,10 @@ class ApprovalIn(BaseModel):
 class AuthSubmitIn(BaseModel):
     auth_id: str = Field(min_length=1)
     code: str = Field(min_length=1)
+
+
+class AuthResultIn(BaseModel):
+    auth_id: str = Field(min_length=1)
 
 
 # -------------------------------------------------------------------- factory
@@ -154,6 +158,7 @@ def create_app(
         NoTurnRunning: 409,
         ApprovalAlreadyResolved: 409,
         AuthFlowPending: 409,
+        AuthFlowNotReady: 409,
         PolicyError: 400,
     }
 
@@ -191,9 +196,14 @@ def create_app(
     async def auth_start() -> dict[str, Any]:
         return await auth_flows.start()
 
-    @app.post("/auth/submit", dependencies=guarded)
+    @app.post("/auth/submit", status_code=202, dependencies=guarded)
     async def auth_submit(body: AuthSubmitIn) -> dict[str, Any]:
         return await auth_flows.submit(body.auth_id, body.code)
+
+    @app.post("/auth/result", dependencies=guarded)
+    async def auth_result(body: AuthResultIn) -> dict[str, Any]:
+        """Outcome of the exchange; the token is returned exactly once (409 while running)."""
+        return await auth_flows.result(body.auth_id)
 
     @app.get("/auth/status", dependencies=guarded)
     async def auth_status() -> dict[str, Any]:

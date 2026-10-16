@@ -1,11 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { assistantApi, isRunnerUnavailable } from '../lib/api'
-import type { AssistantStatus, AuthStart } from '../lib/api'
+import type { AssistantStatus, AuthLastResult, AuthStart } from '../lib/api'
 import { runnerIsUp } from '../lib/status'
 import { Badge, Button, Card, ErrorBox, Icon, NoticeBox } from '../shared'
 
 const STATUS_POLL_MS = 4000
+const EXCHANGE_POLL_MS = 1500
+const EXCHANGE_MAX_MS = 180_000
 
 /** "Sign in with Claude": start → open the URL → paste the code → submit.
  *  Admin only; the API rejects everyone else anyway. */
@@ -67,28 +69,53 @@ export default function ClaudeLogin({ status, onChanged }: { status: AssistantSt
     }
   }
 
+  /** The code is handed over at once (202); the exchange runs in the runner and
+   *  the plugin stores the token itself — we only watch /auth/status for the
+   *  outcome, so a slow exchange never depends on one long browser request. */
   const submit = async () => {
     if (!start || !code.trim()) return
     setBusy('submit')
     setError(null)
+    const authId = start.auth_id
     try {
-      const r = await assistantApi.authSubmit(start.auth_id, code.trim())
-      if (r.ok) {
-        setDone(r.restarting
-          ? t('login.successRestarting', { defaultValue: 'Signed in. The token is stored in Vault and the runner restarts with it.' })
-          : t('login.success', { defaultValue: 'Signed in.' }))
+      await assistantApi.authSubmit(authId, code.trim())
+    } catch (err) {
+      setError((err as Error).message)
+      setBusy(null)
+      return
+    }
+    const startedAt = Date.now()
+    const finish = (res: AuthLastResult | null | undefined, authenticated: boolean) => {
+      if (res?.phase === 'failed') {
+        setError(res.error || t('login.failed', { defaultValue: 'Sign-in failed' }))
+      } else {
+        setDone(authenticated
+          ? t('login.success', { defaultValue: 'Signed in.' })
+          : t('login.successRestarting', { defaultValue: 'Signed in. The token is stored in Vault and the runner restarts with it.' }))
         setStart(null)
         setCode('')
         setPending(false)
         onChanged()
-      } else {
-        setError(r.error || t('login.failed', { defaultValue: 'Sign-in failed' }))
       }
-    } catch (err) {
-      setError((err as Error).message)
-    } finally {
       setBusy(null)
     }
+    const tick = async () => {
+      try {
+        const s = await assistantApi.authStatus()
+        const res = s.last_result
+        const a = s.authenticated
+        const authenticated = typeof a === 'boolean' ? a : typeof a === 'string' && a !== 'none' && a !== ''
+        if (res && res.auth_id === authId && (res.phase === 'failed' || res.phase === 'done')) { finish(res, authenticated); return }
+        if (authenticated && res?.phase === 'storing') { finish(res, true); return }
+      } catch { /* runner restarting with the fresh token → keep polling */ }
+      if (Date.now() - startedAt > EXCHANGE_MAX_MS) {
+        setError(t('login.exchangeTimeout', { defaultValue: 'No outcome from the runner within 3 minutes — check the runner log and start again.' }))
+        setBusy(null)
+        return
+      }
+      window.setTimeout(() => { void tick() }, EXCHANGE_POLL_MS)
+    }
+    window.setTimeout(() => { void tick() }, EXCHANGE_POLL_MS)
   }
 
   const cancel = () => { setStart(null); setCode(''); setError(null) }
@@ -150,6 +177,11 @@ export default function ClaudeLogin({ status, onChanged }: { status: AssistantSt
                 <Button variant="primary" icon="check" label={t('login.submit', { defaultValue: 'Submit code' })} onClick={() => void submit()} disabled={!code.trim()} busy={busy === 'submit'} />
                 <Button label={t('common.cancel', { defaultValue: 'Cancel' })} onClick={cancel} disabled={busy !== null} />
               </div>
+              {busy === 'submit' && (
+                <div style={{ fontSize: '0.72rem', color: 'var(--lx-text-muted)', marginTop: 6 }}>
+                  {t('login.exchanging', { defaultValue: 'The runner exchanges the code for a token and stores it — this can take up to two minutes.' })}
+                </div>
+              )}
             </li>
           </ol>
           {secondsLeft !== null && (

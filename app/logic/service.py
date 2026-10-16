@@ -47,6 +47,8 @@ class AiAssistantService:
         self._bootstrap_lock = asyncio.Lock()
         self._runner_lock = asyncio.Lock()       # one ensure() at a time — never two spawns
         self._watchdog: asyncio.Task | None = None
+        self._login_task: asyncio.Task | None = None
+        self.login_last: dict[str, Any] | None = None    # outcome of the last code submission
         self._recorders: dict[str, asyncio.Task] = {}
         self._seqs: dict[str, int] = {}          # last bridge event seq seen per session
         self._health_cache: tuple[float, dict] | None = None
@@ -232,6 +234,49 @@ class AiAssistantService:
         log.info(f"Claude OAuth token stored by '{by}' — restarting the runner with it.")
         await asyncio.to_thread(self.reload_settings)
         await self.ensure_runner(force=True)
+
+    def start_login_finisher(self, auth_id: str, *, by: str) -> None:
+        """After the code was handed to the bridge: follow the exchange in the
+        background and store the token — independent of the browser request."""
+        if self._login_task and not self._login_task.done():
+            self._login_task.cancel()
+        self.login_last = {"ok": None, "auth_id": auth_id, "phase": "exchanging", "at": _utcnow().isoformat()}
+        create = getattr(self.ctx, "create_task", None) or asyncio.create_task
+        self._login_task = create(self._finish_login(auth_id, by), name=f"ai_assistant:login:{auth_id}")
+
+    async def _finish_login(self, auth_id: str, by: str, timeout: float = 150.0) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        try:
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(1.5)
+                try:
+                    status = await self.bridge()._call("GET", "/auth/status")
+                except BridgeError as exc:
+                    log.warning(f"Login finisher: bridge status unavailable — {exc.detail}")
+                    continue
+                if status.get("auth_id") != auth_id:
+                    self.login_last = {"ok": False, "auth_id": auth_id, "phase": "failed",
+                                       "error": "login flow vanished (cancelled or expired)", "at": _utcnow().isoformat()}
+                    return
+                if not status.get("result_available"):
+                    continue
+                res = await self.bridge()._call("POST", "/auth/result", json={"auth_id": auth_id})
+                if res.get("ok") and res.get("token"):
+                    self.login_last = {"ok": True, "auth_id": auth_id, "phase": "storing", "at": _utcnow().isoformat()}
+                    await self.store_oauth_token(str(res["token"]), by=by)
+                    self.login_last = {"ok": True, "auth_id": auth_id, "phase": "done", "at": _utcnow().isoformat()}
+                else:
+                    err = str(res.get("error") or "sign-in failed")
+                    log.warning(f"Login finisher: exchange failed — {err[:400]}")
+                    self.login_last = {"ok": False, "auth_id": auth_id, "phase": "failed", "error": err, "at": _utcnow().isoformat()}
+                return
+            self.login_last = {"ok": False, "auth_id": auth_id, "phase": "failed",
+                               "error": f"no outcome within {int(timeout)} s", "at": _utcnow().isoformat()}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.error(f"Login finisher failed — {exc}")
+            self.login_last = {"ok": False, "auth_id": auth_id, "phase": "failed", "error": str(exc)[:400], "at": _utcnow().isoformat()}
 
     def allowed_vault_spaces(self) -> list[str]:
         return parse_vault_spaces(self.setting("vault_spaces"))
