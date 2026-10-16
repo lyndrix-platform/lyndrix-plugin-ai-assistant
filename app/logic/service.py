@@ -477,11 +477,19 @@ class AiAssistantService:
     async def _record_turn(self, session_id: str) -> None:
         """Follow the bridge events of one turn and persist the transcript."""
         text_parts: list[str] = []
+        running = False       # a turn ends with `result`, or with `status idle` after `running`
         try:
             async for ev in self.bridge().iter_events(session_id, after=self._last_seq(session_id)):
                 kind, data = ev.get("type"), ev.get("data") or {}
                 self._remember_seq(session_id, int(ev.get("seq") or 0))
-                if kind == "assistant_text":
+                if kind == "status":
+                    state = data.get("state")
+                    if state == "running":
+                        running = True
+                    elif state == "idle" and running:
+                        await self._finish(session_id, text_parts, None)
+                        return
+                elif kind == "assistant_text":
                     if data.get("delta"):
                         text_parts.append(str(data.get("text") or ""))
                     else:
@@ -502,12 +510,13 @@ class AiAssistantService:
                                       {"approval_id": data.get("approval_id"), "decision": data.get("decision")})
                     await self._set_status(session_id, "running")
                 elif kind == "error":
+                    # Not the end: the bridge still sends `result` (or `status idle`) afterwards.
                     await self._store(session_id, "system", "error", str(data.get("message") or "")[:TRANSCRIPT_MAX_CHARS], None)
-                    await self._finish(session_id, text_parts, None)
-                    return
                 elif kind == "result":
                     await self._finish(session_id, text_parts, data)
                     return
+            # stream closed by the bridge (session closed / restart) — close the turn
+            await self._finish(session_id, text_parts, None)
         except Exception as exc:  # noqa: BLE001
             log.warning(f"Recorder for {session_id[:8]} stopped: {exc}")
             await self._set_status(session_id, "idle")
