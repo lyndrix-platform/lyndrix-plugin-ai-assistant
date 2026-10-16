@@ -170,7 +170,7 @@ async function errorFromResponse(res: Response): Promise<ApiError> {
   return new ApiError(res.status, msg, ra ? Number(ra) || null : null)
 }
 
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function apiFetch<T>(path: string, init: RequestInit = {}, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...authHeaders(),
@@ -179,10 +179,17 @@ async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   // Bound every request so a hung backend cannot leave promises pending forever.
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
   try {
     res = await fetch(path, { ...init, headers, signal: controller.signal })
+  } catch (err) {
+    // A timeout surfaces as a bare DOMException ("signal is aborted without reason");
+    // say what happened instead.
+    if ((err as { name?: string })?.name === 'AbortError') {
+      throw new ApiError(0, `Zeitüberschreitung nach ${Math.round(timeoutMs / 1000)} s – das Backend hat nicht geantwortet.`)
+    }
+    throw err
   } finally {
     clearTimeout(timeout)
   }
@@ -202,8 +209,8 @@ const base = (subpath: string) => `/api/plugins/${PLUGIN_ID}/${subpath}`
 
 const pluginApi = {
   get: <T>(subpath: string) => apiFetch<T>(base(subpath)),
-  post: <T>(subpath: string, body?: unknown) =>
-    apiFetch<T>(base(subpath), { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }),
+  post: <T>(subpath: string, body?: unknown, timeoutMs?: number) =>
+    apiFetch<T>(base(subpath), { method: 'POST', body: body !== undefined ? JSON.stringify(body) : undefined }, timeoutMs),
   del: <T>(subpath: string) => apiFetch<T>(base(subpath), { method: 'DELETE' }),
 }
 
@@ -222,7 +229,8 @@ export const assistantApi = {
   runnerLogs: (tail: number) => pluginApi.get<{ logs: string }>(`runner/logs?tail=${encodeURIComponent(String(tail))}`),
 
   // Claude login (OAuth through the CLI inside the runner; admin only)
-  authStart: () => pluginApi.post<AuthStart>('auth/start'),
+  // The CLI needs a few seconds (sometimes >20 s) before it prints the login URL.
+  authStart: () => pluginApi.post<AuthStart>('auth/start', undefined, 60_000),
   authSubmit: (auth_id: string, code: string) => pluginApi.post<AuthSubmitOut>('auth/submit', { auth_id, code }),
   authStatus: () => pluginApi.get<AuthStatus>('auth/status'),
 

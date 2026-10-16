@@ -2,6 +2,12 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.1.1] - 2026-10-16
+### Fixed
+- Login: the authorization URL no longer carries the TUI hint text ("Hold Shift while selecting…") that the ANSI-stripped CLI output glued onto the `state` parameter — the pasted code failed the state check.
+- Settings UI: starting the login waits up to 60 s (the CLI needs a moment to print the URL) and a timeout is reported as such instead of "signal is aborted without reason".
+- Runner: explicit entrypoint command, persistent `/home/agent/.claude` volume, stable fingerprint across core restarts, serialized ensure + watchdog; sessions lost on a bridge restart are recreated with `resume`.
+
 ## [0.1.0] - 2026-10-16
 ### Added
 - Claude Code as an in-app assistant: a long-lived sandboxed runner container (`lyndrix-ai-runner`) driven by an HTTP bridge built on the Claude Agent SDK, started on the instance with the `runner` role (placement `pinned:runner`, lease `ai_assistant:runner`).

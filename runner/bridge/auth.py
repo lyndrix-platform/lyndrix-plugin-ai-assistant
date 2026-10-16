@@ -38,6 +38,15 @@ TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{20,}")
 ANY_TOKEN_RE = re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")
 ERROR_RE = re.compile(r"(OAuth error[^\n]*|Invalid code[^\n]*|Error:[^\n]*)")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=>]")
+# The ink renderer positions the hint lines after the URL with cursor moves, not
+# newlines, so after ANSI stripping the next hint ("Hold Shift while selecting…",
+# "Paste code here if prompted >") is glued to the URL. Cut it off there.
+URL_TAIL_RE = re.compile(r"(Hold\s*Shift|Paste\s*code|Browser\s*didn|Press\s*Enter).*$", re.IGNORECASE | re.DOTALL)
+
+
+def clean_url(url: str) -> str:
+    """The authorization URL without hint text that the TUI glued onto it."""
+    return URL_TAIL_RE.sub("", url).rstrip(".,;:)")
 
 PTY_ROWS, PTY_COLS = 50, 1000  # wide enough that the URL is never wrapped
 
@@ -143,7 +152,7 @@ class AuthFlowManager:
                 tail = scrub(flow.text()[-400:])
                 await self._terminate(flow)
                 raise AuthFlowError(f"claude setup-token printed no authorization URL; output tail: {tail!r}")
-            flow.url = match.group(0)
+            flow.url = clean_url(match.group(0))
             flow.expiry_task = asyncio.create_task(self._expire(flow))
             log.info("login flow started", extra={"ctx": {"auth_id": flow.auth_id}})
             return {

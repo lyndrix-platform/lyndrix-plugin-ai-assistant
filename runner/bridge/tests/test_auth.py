@@ -113,3 +113,13 @@ async def test_expiry_terminates_flow(fake_cli):
     await asyncio.sleep(1.3)
     assert flows.pending is None and flows.status()["pending"] is False
     assert proc.returncode is not None  # the CLI process was terminated, not leaked
+
+
+def test_clean_url_cuts_glued_hint_text():
+    from bridge.auth import clean_url
+
+    glued = ("https://claude.com/cai/oauth/authorize?code=true&client_id=abc&code_challenge=x&code_challenge_method=S256"
+             "&state=YTcDvX8-OnbuTmG06pIQm2yklvxuOTtW33Opo6klaPkHoldShiftwhileselectingtouseyourterminal")
+    assert clean_url(glued).endswith("&state=YTcDvX8-OnbuTmG06pIQm2yklvxuOTtW33Opo6klaPk")
+    assert clean_url("https://claude.com/x?state=abcPastecodehereifprompted>") == "https://claude.com/x?state=abc"
+    assert clean_url("https://claude.com/x?state=abc") == "https://claude.com/x?state=abc"
