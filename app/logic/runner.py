@@ -61,6 +61,11 @@ class RunnerConfig:
         self.host_workspace = host_workspace
         self.network = network
 
+    def describe(self) -> str:
+        """Secret-free summary for the log (what the fingerprint is made of)."""
+        return (f"image={self.image} ws={self.host_workspace} net={self.network} "
+                f"auth={','.join(sorted(self.auth_env)) or 'none'} model={self.model or '-'}")
+
     def fingerprint(self) -> str:
         import hashlib
 
@@ -87,19 +92,19 @@ class RunnerManager:
         return secrets.token_urlsafe(32)
 
     async def host_storage_dir(self) -> str:
-        """Host path of ``STORAGE_DIR`` (the runner mounts a sub-directory of it)."""
+        """Host path of ``STORAGE_DIR`` (the runner mounts a sub-directory of it).
+
+        Never guesses: a wrong source would make Docker create an empty directory on
+        the host and the agent would work in a workspace without instructions. A
+        failed lookup raises, ``ensure()`` reports it and the watchdog retries."""
         if self._host_storage:
             return self._host_storage
         target = str(self.storage_dir)
-        try:
-            mounts = await self.socket_client.resolve_runtime_mounts([target])
-            source = (mounts or {}).get(target)
-            if source:
-                self._host_storage = str(source)
-                return self._host_storage
-        except Exception as exc:
-            log.warning(f"Runner: could not resolve the host path of {target} via the socket manager: {exc}")
-        self._host_storage = target  # same path on host and in the container (bind mount)
+        mounts = await self.socket_client.resolve_runtime_mounts([target], timeout=60.0)
+        source = (mounts or {}).get(target)
+        if not source:
+            raise RuntimeError(f"host path of {target} unknown (socket manager returned {mounts!r})")
+        self._host_storage = str(source)
         return self._host_storage
 
     @staticmethod
@@ -161,7 +166,7 @@ class RunnerManager:
         try:
             if force or changed or state is None:
                 if state is not None:
-                    log.info(f"Runner: recreating {CONTAINER_NAME} ({'forced' if force else 'configuration changed'})")
+                    log.info(f"Runner: recreating {CONTAINER_NAME} ({'forced' if force else 'configuration changed'}) — {cfg.describe()}")
                     await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME)
                 await self._spawn(cfg)
             elif state != "running":

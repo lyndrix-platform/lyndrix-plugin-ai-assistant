@@ -48,10 +48,11 @@ class SocketBusClient:
         finally:
             self._pending.pop(request_id, None)
 
-    async def resolve_runtime_mounts(self, required_targets: list[str] | None = None):
+    async def resolve_runtime_mounts(self, required_targets: list[str] | None = None, timeout: float | None = None):
         result = await self.request(
             "docker:resolve_mounts",
             args={"required_targets": required_targets or []},
+            timeout=timeout,
         )
         return result.get("mounts") if isinstance(result, dict) else {}
 

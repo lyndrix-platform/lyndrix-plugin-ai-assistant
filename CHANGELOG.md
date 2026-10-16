@@ -2,6 +2,10 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.1.3] - 2026-10-16
+### Fixed
+- Runner: when the socket manager could not resolve the host path of the storage within 15 s the plugin fell back to the container path — Docker then created an empty directory on the host, the fingerprint flipped and the runner was recreated with a workspace without instructions. The lookup now waits 60 s and fails loudly (the watchdog retries); recreate log lines say what changed.
+
 ## [0.1.2] - 2026-10-16
 ### Fixed
 - Login: the plugin's calls to the bridge used a 20 s timeout while the CLI may need up to 45 s for the URL and 90 s for the token exchange — a slow exchange ended in a 500 and the one-time token was lost. Timeouts are now aligned (UI ≥ plugin ≥ bridge) and connection errors while the container restarts answer 503 with Retry-After instead of a traceback.
