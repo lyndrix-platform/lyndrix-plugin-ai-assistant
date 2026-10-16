@@ -60,3 +60,19 @@ def test_invalid_policy_rejected():
 def test_round_trip():
     raw = {"allow": [{"tool": "Read"}], "ask": [], "deny": [{"tool": "Bash", "match": "sudo"}]}
     assert Policy.from_dict(raw).to_dict() == raw
+
+
+def test_auto_mode_allows_unmatched_calls_but_policy_still_wins():
+    from bridge.policy import Policy, fallback_verdict
+
+    assert fallback_verdict("auto", "Bash") == "allow" and fallback_verdict("auto", "Write") == "allow"
+    policy = Policy.from_dict({"deny": [{"tool": "Bash", "match": "rm -rf"}], "ask": [{"tool": "Bash", "match": "^git push"}]})
+    assert policy.evaluate("Bash", {"command": "rm -rf /"}) == "deny"
+    assert policy.evaluate("Bash", {"command": "git push origin main"}) == "ask"
+    assert policy.evaluate("Bash", {"command": "ls"}) is None          # → fallback → allow in auto
+
+
+def test_sdk_mode_mapping():
+    from bridge.claude_provider import sdk_permission_mode
+
+    assert sdk_permission_mode("auto") == "default" and sdk_permission_mode("plan") == "plan"

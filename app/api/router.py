@@ -33,6 +33,10 @@ class MessageIn(BaseModel):
     content: str = Field(..., min_length=1, max_length=50_000)
 
 
+class PermissionModeIn(BaseModel):
+    permission_mode: str = Field(..., pattern="^(default|acceptEdits|plan|auto|bypassPermissions)$")
+
+
 class ApprovalIn(BaseModel):
     decision: str = Field(..., pattern="^(allow|deny|allow_always)$")
     updated_input: Optional[dict] = None
@@ -246,6 +250,22 @@ def build_router() -> APIRouter:
             return await ai_service.approve(session_id, approval_id, payload.decision, payload.updated_input, payload.message)
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
+
+    @router.post("/sessions/{session_id}/permission-mode")
+    async def set_permission_mode(session_id: str, payload: PermissionModeIn,
+                                  identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+        """Per-session approval switch. ``auto`` allows everything the guardrails do not
+        deny/ask; ``bypassPermissions`` also disables the guardrails and is admin-only."""
+        _require_runner()
+        await asyncio.to_thread(_owned, session_id, identity)
+        if payload.permission_mode == "bypassPermissions" and not identity.allows(PERM_ADMIN):
+            raise HTTPException(status_code=403, detail="bypassPermissions disables the guardrails — administrators only")
+        try:
+            return await ai_service.set_permission_mode(session_id, identity.username, payload.permission_mode)
+        except BridgeError as exc:
+            raise _bridge_http(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.post("/sessions/{session_id}/interrupt")
     async def interrupt(session_id: str, identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):

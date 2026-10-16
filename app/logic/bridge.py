@@ -78,6 +78,9 @@ class BridgeClient:
             body["message"] = message
         return await self._call("POST", f"/sessions/{session_id}/approvals/{approval_id}", json=body)
 
+    async def set_permission_mode(self, session_id: str, mode: str) -> dict:
+        return await self._call("POST", f"/sessions/{session_id}/permission-mode", json={"permission_mode": mode})
+
     async def interrupt(self, session_id: str) -> dict:
         return await self._call("POST", f"/sessions/{session_id}/interrupt")
 

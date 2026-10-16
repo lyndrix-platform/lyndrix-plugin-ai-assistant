@@ -5,7 +5,17 @@ import type { Phase } from './model'
 
 const MAX_ROWS = 10
 
-export default function Composer({ phase, disabled, disabledHint, onSend, onInterrupt, compact, autoFocus }: {
+/** Approval modes the operator can switch per session. `auto` = run every tool the
+ *  deny/ask guardrails do not stop; `bypassPermissions` also drops the guardrails (admins). */
+const MODES: { id: string; icon: string; labelKey: string; label: string; hintKey: string; hint: string; admin?: boolean }[] = [
+  { id: 'default', icon: 'help_outline', labelKey: 'composer.mode.default', label: 'Ask', hintKey: 'composer.modeHint.default', hint: 'Every tool call asks for your approval.' },
+  { id: 'acceptEdits', icon: 'edit_note', labelKey: 'composer.mode.acceptEdits', label: 'Edits', hintKey: 'composer.modeHint.acceptEdits', hint: 'File edits in the workspace run without asking; everything else asks.' },
+  { id: 'auto', icon: 'bolt', labelKey: 'composer.mode.auto', label: 'Auto', hintKey: 'composer.modeHint.auto', hint: 'Runs every tool call unless a deny rule blocks it or an ask rule flags it.' },
+  { id: 'plan', icon: 'visibility', labelKey: 'composer.mode.plan', label: 'Plan', hintKey: 'composer.modeHint.plan', hint: 'Read-only: nothing is changed.' },
+  { id: 'bypassPermissions', icon: 'warning_amber', labelKey: 'composer.mode.bypass', label: 'Bypass', hintKey: 'composer.modeHint.bypass', hint: 'Allows everything and disables the guardrails — administrators only.', admin: true },
+]
+
+export default function Composer({ phase, disabled, disabledHint, onSend, onInterrupt, compact, autoFocus, permissionMode, onChangeMode, isAdmin }: {
   phase: Phase
   /** No session / no permission / runner down — the textarea is locked. */
   disabled: boolean
@@ -14,10 +24,21 @@ export default function Composer({ phase, disabled, disabledHint, onSend, onInte
   onInterrupt: () => void
   compact: boolean
   autoFocus?: boolean
+  /** Current approval mode of the session (shown + switchable when onChangeMode is given). */
+  permissionMode?: string | null
+  onChangeMode?: (mode: string) => Promise<void> | void
+  isAdmin?: boolean
 }) {
   const { t } = useTranslation('ai_assistant')
   const [text, setText] = useState('')
   const [interrupting, setInterrupting] = useState(false)
+  const [switching, setSwitching] = useState<string | null>(null)
+  const changeMode = async (mode: string) => {
+    if (!onChangeMode || mode === permissionMode || switching) return
+    setSwitching(mode)
+    try { await onChangeMode(mode) } finally { setSwitching(null) }
+  }
+  const modes = MODES.filter((m) => !m.admin || isAdmin || m.id === permissionMode)
   const ref = useRef<HTMLTextAreaElement>(null)
   const running = phase === 'running' || phase === 'waiting_approval'
   const locked = disabled || running || phase === 'closed'
@@ -92,11 +113,32 @@ export default function Composer({ phase, disabled, disabledHint, onSend, onInte
             </button>
           )}
         </div>
-        {!compact && (
-          <div style={{ fontSize: '0.68rem', color: 'var(--lx-text-muted)', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-            <span>{t('composer.hint', { defaultValue: 'Enter sends · Shift+Enter inserts a line break · tool calls may ask for your permission.' })}</span>
-          </div>
-        )}
+        <div style={{ fontSize: '0.68rem', color: 'var(--lx-text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          {!compact && <span>{t('composer.hint', { defaultValue: 'Enter sends · Shift+Enter inserts a line break · tool calls may ask for your permission.' })}</span>}
+          {onChangeMode && (
+            <div role="radiogroup" aria-label={t('composer.modeLabel', { defaultValue: 'Approval mode' })}
+              style={{ display: 'inline-flex', gap: 2, padding: 2, borderRadius: 'var(--lx-radius-sm)', border: '1px solid var(--lx-border-soft)', background: 'var(--lx-surface)', marginLeft: 'auto' }}>
+              {modes.map((m) => {
+                const active = m.id === permissionMode
+                const danger = m.id === 'bypassPermissions'
+                return (
+                  <button key={m.id} type="button" role="radio" aria-checked={active} disabled={disabled || phase === 'closed' || !!switching}
+                    onClick={() => void changeMode(m.id)}
+                    title={t(m.hintKey, { defaultValue: m.hint })}
+                    className="lxai-modebtn"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4, padding: compact ? '2px 6px' : '3px 8px', borderRadius: 'calc(var(--lx-radius-sm) - 2px)', border: 'none', cursor: 'pointer', fontSize: '0.68rem',
+                      background: active ? (danger ? 'var(--lx-state-down)' : m.id === 'auto' ? 'var(--lx-accent)' : 'var(--lx-elevated)') : 'transparent',
+                      color: active ? (m.id === 'auto' || danger ? '#fff' : 'var(--lx-text)') : 'var(--lx-text-muted)', fontWeight: active ? 600 : 400,
+                    }}>
+                    {switching === m.id ? <span className="lx-spinner" style={{ width: 10, height: 10, borderWidth: 2 }} /> : <Icon name={m.icon} size={13} />}
+                    {(!compact || active) && t(m.labelKey, { defaultValue: m.label })}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   )

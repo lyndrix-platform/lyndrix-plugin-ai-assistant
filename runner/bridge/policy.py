@@ -153,7 +153,7 @@ def fallback_verdict(permission_mode: str, tool_name: str) -> Verdict:
     (acceptEdits never asks for edits, bypassPermissions never asks at all),
     so this mostly matters for ``default`` and ``plan``.
     """
-    if permission_mode == "bypassPermissions":
+    if permission_mode in ("bypassPermissions", "auto"):
         return "allow"
     if permission_mode == "acceptEdits":
         return "allow" if tool_name in FILE_EDIT_TOOLS else "ask"

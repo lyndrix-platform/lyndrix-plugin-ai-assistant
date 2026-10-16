@@ -54,6 +54,9 @@ Dateiänderungen im Workspace, `plan` verändert nichts, `bypassPermissions` erl
 gegen Befehl bzw. Pfad): `guardrails_allow` läuft ohne Rückfrage, `guardrails_ask` fragt
 immer, `guardrails_deny` lehnt ab. Auswertung in der Bridge: deny → allow → ask → Modus.
 Eine Freigabe „Immer erlauben“ im Chat gilt für die Session.
+Der Modus lässt sich **pro Session im Chat umschalten** (Fragen · Bearbeiten · Auto · Plan):
+`auto` erlaubt alles, was die Deny-/Ask-Regeln nicht stoppen – anders als `bypassPermissions`,
+das auch die Guardrails abschaltet und deshalb Administratoren vorbehalten ist.
 
 ## Zugriff des Agenten auf Lyndrix
 

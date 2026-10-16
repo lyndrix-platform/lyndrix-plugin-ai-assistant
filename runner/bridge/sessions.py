@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .claude_provider import Decision, Provider, ProviderSession, SessionSpec, TranslationState, translate
+from .claude_provider import Decision, Provider, ProviderSession, SessionSpec, TranslationState, translate, PERMISSION_MODES
 from .config import Settings
 from .events import EventLog, summarise_input, utc_now_iso
 from .policy import Policy, fallback_verdict, render_input
@@ -244,6 +244,22 @@ class SessionManager:
                 # drop it so the next turn resumes in a fresh process.
                 await self._drop_provider_session(session)
             session.set_status(STATUS_IDLE)
+
+    async def set_permission_mode(self, session: Session, mode: str) -> None:
+        """Switch the approval mode of a session (and of its live CLI, if open)."""
+        if session.status == STATUS_CLOSED:
+            raise SessionClosed(session.session_id)
+        if mode not in PERMISSION_MODES:
+            raise SessionError(f"unknown permission mode '{mode}'")
+        session.spec = SessionSpec(**{**session.spec.__dict__, "permission_mode": mode})
+        live = session.provider_session
+        if live is not None and hasattr(live, "set_permission_mode"):
+            try:
+                await live.set_permission_mode(mode)
+            except Exception as exc:  # noqa: BLE001 — the next turn reopens with the new spec anyway
+                log.warning("set_permission_mode on the live CLI failed", extra={"ctx": {"session_id": session.session_id, "error": str(exc)[:200]}})
+        session.emit("mode_changed", {"permission_mode": mode})
+        log.info("permission mode changed", extra={"ctx": {"session_id": session.session_id, "mode": mode}})
 
     async def interrupt(self, session: Session) -> None:
         if session.turn_task is None or session.turn_task.done() or session.provider_session is None:

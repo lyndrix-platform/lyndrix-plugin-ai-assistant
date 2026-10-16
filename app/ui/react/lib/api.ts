@@ -273,6 +273,9 @@ export const assistantApi = {
   approve: (id: string, approvalId: string, decision: ApprovalDecision) =>
     pluginApi.post<Record<string, unknown>>(`sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`, { decision }),
   interrupt: (id: string) => pluginApi.post<Record<string, unknown>>(`sessions/${encodeURIComponent(id)}/interrupt`),
+  /** Per-session approval mode: default | acceptEdits | plan | auto | bypassPermissions (admins). */
+  setPermissionMode: (id: string, permission_mode: string) =>
+    pluginApi.post<{ session_id: string; permission_mode: string }>(`sessions/${encodeURIComponent(id)}/permission-mode`, { permission_mode }),
   closeSession: (id: string) => pluginApi.del<{ ok: boolean }>(`sessions/${encodeURIComponent(id)}`),
   /** URL of the SSE proxy — consumed by lib/sse.ts with the bearer header. */
   eventsUrl: (id: string, after: number) => base(`sessions/${encodeURIComponent(id)}/events?after=${Math.max(0, Math.floor(after))}`),

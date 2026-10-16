@@ -123,6 +123,9 @@ class FakeProviderSession:
             else:
                 yield step
 
+    async def set_permission_mode(self, mode: str) -> None:
+        self.provider.mode_switches.append((self.spec.user, mode))
+
     async def interrupt(self) -> None:
         self.provider.interrupted += 1
         for step in self.provider.script_for(""):
@@ -142,6 +145,7 @@ class FakeProvider:
     def __init__(self, script: Script | None = None) -> None:
         self.script: Script = script if script is not None else [assistant(text("hello")), result()]
         self.opened: list[SessionSpec] = []
+        self.mode_switches: list[tuple[str, str]] = []
         self.sent: list[str] = []
         self.decisions: list[Decision] = []
         self.interrupted = 0

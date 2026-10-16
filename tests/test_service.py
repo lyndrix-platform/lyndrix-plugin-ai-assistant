@@ -53,6 +53,10 @@ class _FakeBridge:
         self.sent.append((sid, content))
         return {"accepted": True}
 
+    async def set_permission_mode(self, sid, mode):
+        self.modes = getattr(self, "modes", []) + [(sid, mode)]
+        return {"session_id": sid, "permission_mode": mode}
+
     async def get_session(self, sid):
         if sid in self.lost:
             from ai_plugin.app.logic.bridge import BridgeError
@@ -201,3 +205,24 @@ def test_bridge_session_recreated_after_runner_restart(db):
         assert row.turns == 2
         results = [m for m in s.query(AiMessage).filter(AiMessage.session_id == sid) if m.kind == "result"]
         assert results[0].meta["result"] == "done"
+
+
+def test_permission_mode_switch_updates_bridge_and_row(db):
+    bridge = _FakeBridge()
+    svc = _svc(_Ctx({}), bridge)
+
+    async def run():
+        s = await svc.create_session("marvin", "Modes")
+        await svc.set_permission_mode(s["id"], "marvin", "auto")
+        try:
+            await svc.set_permission_mode(s["id"], "marvin", "yolo")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid mode accepted")
+        return s["id"]
+
+    sid = asyncio.run(run())
+    assert bridge.modes == [(sid, "auto")]
+    with db() as s:
+        assert s.get(AiSession, sid).permission_mode == "auto"

@@ -26,9 +26,11 @@ from .workspace import WorkspaceManager
 
 log = get_logger("Plugin:AI:Service")
 
-PLUGIN_VERSION = "0.2.0"              # kept in sync with entrypoint.manifest.version by tests
+PLUGIN_VERSION = "0.3.0"              # kept in sync with entrypoint.manifest.version by tests
 PROVIDERS = ("claude-code",)           # "hermes" follows once the Hermes provider exists
-PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
+# "auto" = the bridge allows every call the guardrails do not deny or flag "ask";
+# unlike bypassPermissions it keeps the deny/ask rules in force.
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "bypassPermissions")
 DEFAULT_IMAGE = "ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest"
 TRANSCRIPT_MAX_CHARS = 6000
 
@@ -495,6 +497,25 @@ class AiAssistantService:
                       updated_input: dict | None = None, message: str | None = None) -> dict:
         res = await self.bridge().approve(session_id, approval_id, decision, updated_input, message)
         return res or {"ok": True}
+
+    async def set_permission_mode(self, session_id: str, owner: str, mode: str) -> dict:
+        """Switch a session's approval mode (bridge + DB row)."""
+        if mode not in PERMISSION_MODES:
+            raise ValueError(f"permission_mode must be one of {PERMISSION_MODES}")
+        await self._ensure_bridge_session(session_id, owner)
+        res = await self.bridge().set_permission_mode(session_id, mode)
+
+        def _tx():
+            with get_session() as s:
+                row = s.get(AiSession, session_id)
+                if row is not None:
+                    row.permission_mode = mode
+                    row.last_activity = _utcnow()
+                    s.commit()
+
+        if self.is_ready:
+            await asyncio.to_thread(retry_write, _tx)
+        return res or {"session_id": session_id, "permission_mode": mode}
 
     async def interrupt(self, session_id: str) -> dict:
         return (await self.bridge().interrupt(session_id)) or {"ok": True}

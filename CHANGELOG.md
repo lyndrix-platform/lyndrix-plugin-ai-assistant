@@ -2,6 +2,10 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.3.0] - 2026-10-16
+### Added
+- Approval mode switch per session (chat composer): Ask (`default`), Edits (`acceptEdits`), **Auto** (`auto` — every tool call runs unless a deny rule blocks it or an ask rule flags it) and Plan; `bypassPermissions` stays admin-only because it also disables the guardrails. Bridge: `POST /sessions/{id}/permission-mode`, mode `auto` maps to the CLI's `default` so the policy is still consulted; a live CLI is switched in place.
+
 ## [0.2.0] - 2026-10-16
 ### Changed
 - Instructions: `CLAUDE.md` no longer copies every plugin's `ai_instructions`. It carries the base instructions plus a generated **index** of the installed plugins (id, version, purpose, URL of the full guide) and the rule to fetch a plugin's guide from the running plugin before operating it, cached per version under `.lyndrix/cache/` (git-ignored). The pre-0.2 copies in `.lyndrix/instructions/` are removed on sync. Needs core API 1.12 for `ai_instructions_route`/`GET /api/ai/plugins`; on 1.11 only purposes are listed.

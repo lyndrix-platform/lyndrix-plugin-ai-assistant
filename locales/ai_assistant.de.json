@@ -67,7 +67,22 @@
     "interruptHint": "Aktuellen Durchlauf abbrechen",
     "interrupt": "Unterbrechen",
     "send": "Senden",
-    "hint": "Enter sendet · Shift+Enter fügt einen Zeilenumbruch ein · Tool-Aufrufe fragen ggf. um Erlaubnis."
+    "hint": "Enter sendet · Shift+Enter fügt einen Zeilenumbruch ein · Tool-Aufrufe fragen ggf. um Erlaubnis.",
+    "modeLabel": "Freigabemodus",
+    "mode": {
+      "default": "Fragen",
+      "acceptEdits": "Bearbeiten",
+      "auto": "Auto",
+      "plan": "Plan",
+      "bypass": "Bypass"
+    },
+    "modeHint": {
+      "default": "Jeder Werkzeugaufruf fragt nach deiner Freigabe.",
+      "acceptEdits": "Dateiänderungen im Workspace laufen ohne Rückfrage, alles andere fragt.",
+      "auto": "Führt jeden Werkzeugaufruf aus, sofern keine Deny-Regel blockt oder eine Ask-Regel greift.",
+      "plan": "Nur lesen: Es wird nichts verändert.",
+      "bypass": "Erlaubt alles und schaltet die Guardrails ab – nur für Administratoren."
+    }
   },
   "approval": {
     "allowed": "erlaubt",

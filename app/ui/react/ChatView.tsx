@@ -249,6 +249,16 @@ export default function ChatView({ compact = false }: { compact?: boolean }) {
           onInterrupt={() => void chat.interrupt()}
           compact={compact}
           autoFocus={!compact}
+          permissionMode={current?.permission_mode ?? status?.permission_mode ?? null}
+          isAdmin={access.isAdmin}
+          onChangeMode={canWriteCurrent ? async (mode) => {
+            try {
+              await assistantApi.setPermissionMode(selectedId, mode)
+              await loadSessions(true)
+            } catch (err) {
+              setListError((err as Error).message)
+            }
+          } : undefined}
         />
       )}
     </div>

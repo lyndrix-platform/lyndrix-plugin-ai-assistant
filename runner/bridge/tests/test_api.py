@@ -226,3 +226,19 @@ def test_bridge_version_comes_from_the_version_file():
     from bridge import __version__
 
     assert re.fullmatch(r"\d+\.\d+\.\d+", __version__) and __version__ != "0.0.0"
+
+
+async def test_permission_mode_switch(client, provider):
+    r = await client.post("/sessions", json={"user": "marvin", "permission_mode": "default"})
+    sid = r.json()["session_id"]
+    r = await client.post(f"/sessions/{sid}/permission-mode", json={"permission_mode": "auto"})
+    assert r.status_code == 200 and r.json()["permission_mode"] == "auto"
+    detail = (await client.get(f"/sessions/{sid}")).json()
+    assert detail["permission_mode"] == "auto"
+    assert any(e["type"] == "mode_changed" and e["data"]["permission_mode"] == "auto" for e in detail["events"])
+    assert (await client.post(f"/sessions/{sid}/permission-mode", json={"permission_mode": "yolo"})).status_code == 422
+    # a live CLI gets the switch too
+    await client.post(f"/sessions/{sid}/messages", json={"content": "hi"})
+    await wait_for(lambda: provider.opened)
+    await client.post(f"/sessions/{sid}/permission-mode", json={"permission_mode": "plan"})
+    assert ("marvin", "plan") in provider.mode_switches

@@ -56,7 +56,15 @@ log = logging.getLogger("bridge.claude")
 # the callback is then skipped for them. That is intended here, so log instead.
 warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
-PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions", "plan")
+PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions", "plan", "auto")
+# "auto" is the bridge's own mode: the CLI runs in "default" (so every call still
+# reaches can_use_tool and the deny/ask rules apply) and the fallback for an
+# unmatched call is "allow". Unlike bypassPermissions it never shadows the policy.
+SDK_PERMISSION_MODE = {"auto": "default"}
+
+
+def sdk_permission_mode(mode: str) -> str:
+    return SDK_PERMISSION_MODE.get(mode, mode)
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +104,7 @@ class ProviderSession(Protocol):
     async def send(self, content: str) -> AsyncIterator[Any]: ...
     async def interrupt(self) -> None: ...
     async def close(self) -> None: ...
+    async def set_permission_mode(self, mode: str) -> None: ...
 
 
 class Provider(Protocol):
@@ -301,7 +310,7 @@ def build_options(
         system_prompt["append"] = spec.append_system_prompt
     return ClaudeAgentOptions(
         cwd=spec.cwd,
-        permission_mode=spec.permission_mode,  # type: ignore[arg-type]
+        permission_mode=sdk_permission_mode(spec.permission_mode),  # type: ignore[arg-type]
         allowed_tools=list(spec.allowed_tools),
         model=spec.model or settings.model,
         resume=spec.resume,
@@ -330,6 +339,10 @@ class ClaudeCodeSession:
 
     async def interrupt(self) -> None:
         await self._client.interrupt()
+
+    async def set_permission_mode(self, mode: str) -> None:
+        """Switch the live CLI process (bridge mode "auto" maps to the SDK's "default")."""
+        await self._client.set_permission_mode(sdk_permission_mode(mode))  # type: ignore[arg-type]
 
     async def close(self) -> None:
         await self._client.disconnect()

@@ -67,7 +67,22 @@
     "interruptHint": "Stop the current turn",
     "interrupt": "Interrupt",
     "send": "Send",
-    "hint": "Enter sends · Shift+Enter inserts a line break · tool calls may ask for your permission."
+    "hint": "Enter sends · Shift+Enter inserts a line break · tool calls may ask for your permission.",
+    "modeLabel": "Approval mode",
+    "mode": {
+      "default": "Ask",
+      "acceptEdits": "Edits",
+      "auto": "Auto",
+      "plan": "Plan",
+      "bypass": "Bypass"
+    },
+    "modeHint": {
+      "default": "Every tool call asks for your approval.",
+      "acceptEdits": "File edits in the workspace run without asking; everything else asks.",
+      "auto": "Runs every tool call unless a deny rule blocks it or an ask rule flags it.",
+      "plan": "Read-only: nothing is changed.",
+      "bypass": "Allows everything and disables the guardrails — administrators only."
+    }
   },
   "approval": {
     "allowed": "allowed",

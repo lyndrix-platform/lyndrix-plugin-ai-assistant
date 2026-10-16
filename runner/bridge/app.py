@@ -37,7 +37,7 @@ from .sessions import (
 
 log = logging.getLogger("bridge.app")
 
-PermissionMode = Literal["default", "acceptEdits", "bypassPermissions", "plan"]
+PermissionMode = Literal["default", "acceptEdits", "bypassPermissions", "plan", "auto"]
 assert set(PermissionMode.__args__) == set(PERMISSION_MODES)  # type: ignore[attr-defined]
 
 
@@ -73,6 +73,10 @@ class CreateSessionIn(BaseModel):
 
 class MessageIn(BaseModel):
     content: str = Field(min_length=1)
+
+
+class PermissionModeIn(BaseModel):
+    permission_mode: PermissionMode
 
 
 class ApprovalIn(BaseModel):
@@ -281,6 +285,13 @@ def create_app(
         session = manager.get(session_id)
         manager.resolve_approval(session, approval_id, body.decision, body.updated_input, body.message)
         return {"resolved": True, "approval_id": approval_id, "decision": body.decision}
+
+    @app.post("/sessions/{session_id}/permission-mode", dependencies=guarded)
+    async def set_permission_mode(session_id: str, body: PermissionModeIn) -> dict[str, Any]:
+        """Switch approvals for this session: default | acceptEdits | plan | auto | bypassPermissions."""
+        session = manager.get(session_id)
+        await manager.set_permission_mode(session, body.permission_mode)
+        return {"session_id": session.session_id, "permission_mode": body.permission_mode}
 
     @app.post("/sessions/{session_id}/interrupt", status_code=202, dependencies=guarded)
     async def interrupt(session_id: str) -> dict[str, Any]:
