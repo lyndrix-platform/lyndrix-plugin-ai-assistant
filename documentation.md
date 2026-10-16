@@ -70,7 +70,7 @@ Benutzerverwaltung — Rollen und Gruppen wie bei jedem anderen Benutzer. Vault-
 | POST | `/workspace/sync` | api:admin | Repo aktualisieren, Instruktionen neu erzeugen |
 | POST | `/runner/restart` | api:admin | Container neu erzeugen |
 | GET | `/runner/logs?tail=` | api:admin | Container-Log |
-| POST/GET | `/auth/start`, `/auth/submit`, `/auth/status` | api:admin | Claude-Login über die CLI |
+| POST/GET/DELETE | `/auth/start`, `/auth/submit`, `/auth/status`, `/auth/{id}` | api:admin | Claude-Login über die CLI (starten, Code senden, Stand, abbrechen) |
 | GET/POST | `/sessions` | api:read / api:write | eigene Sessions (Admins: `?all=true`) |
 | GET | `/sessions/{id}` | api:read | Session, Verlauf, Live-Zustand |
 | POST | `/sessions/{id}/messages` | api:write | Nachricht senden (202) |

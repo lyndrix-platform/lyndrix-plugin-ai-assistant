@@ -123,6 +123,15 @@ def build_router() -> APIRouter:
             return {"ok": True, "restarting": True}
         return {"ok": False, "error": (result or {}).get("error") if isinstance(result, dict) else "unknown"}
 
+    @router.delete("/auth/{auth_id}")
+    async def auth_cancel(auth_id: str, _identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+        """Abort a pending login (the CLI process is terminated; a new one can start)."""
+        _require_runner()
+        try:
+            return await ai_service.bridge()._call("DELETE", f"/auth/{auth_id}")
+        except BridgeError as exc:
+            raise _bridge_http(exc) from exc
+
     @router.get("/auth/status")
     async def auth_status(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
         if ai_service.runner is None or ai_service.runner.client is None:
