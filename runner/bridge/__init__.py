@@ -14,4 +14,20 @@ Modules, one per concern:
 - :mod:`bridge.app`              — HTTP contract (routes, auth, SSE)
 """
 
-__version__ = "0.1.0"
+from pathlib import Path as _Path
+
+
+def _read_version() -> str:
+    """Single source of truth is ``runner/VERSION`` (copied to ``/opt/bridge/VERSION``
+    in the image); the fallback only matters for odd checkouts."""
+    for candidate in (_Path(__file__).resolve().parent.parent / "VERSION", _Path("/opt/bridge/VERSION")):
+        try:
+            text = candidate.read_text().strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return "0.0.0"
+
+
+__version__ = _read_version()

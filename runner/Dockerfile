@@ -38,7 +38,7 @@ RUN python3 -m venv /opt/bridge/venv \
       -r /opt/bridge/requirements.txt -r /opt/bridge/requirements-dev.txt \
  && rm -f /opt/bridge/venv/lib/python3*/site-packages/claude_agent_sdk/_bundled/claude
 
-COPY pyproject.toml entrypoint.sh /opt/bridge/
+COPY pyproject.toml entrypoint.sh VERSION /opt/bridge/
 COPY bridge/ /opt/bridge/bridge/
 RUN chmod 0755 /opt/bridge/entrypoint.sh \
  && chown -R agent:agent /opt/bridge/bridge /opt/bridge/pyproject.toml \

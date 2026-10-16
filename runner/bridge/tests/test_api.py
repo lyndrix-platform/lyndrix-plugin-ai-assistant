@@ -218,3 +218,11 @@ async def test_create_session_with_client_id_and_max_turns(client, provider):
     await wait_for(lambda: provider.opened)
     assert provider.opened[0].max_turns == 7 and provider.opened[0].resume == "cs-42"
     assert (await client.post("/sessions", json={"user": "x", "session_id": "short"})).status_code == 422
+
+
+def test_bridge_version_comes_from_the_version_file():
+    import re
+
+    from bridge import __version__
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__) and __version__ != "0.0.0"
