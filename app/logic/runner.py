@@ -132,6 +132,19 @@ class RunnerManager:
         res = _docker("inspect", "-f", "{{.State.Status}}", CONTAINER_NAME, timeout=15)
         return res.stdout.strip() if res.returncode == 0 else None
 
+    @staticmethod
+    def container_fingerprint() -> Optional[str]:
+        """The fingerprint the running container was created with (env
+        ``LYNDRIX_AI_FINGERPRINT``) — so a core restart does not recreate an
+        unchanged runner."""
+        res = _docker("inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", CONTAINER_NAME, timeout=15)
+        if res.returncode != 0:
+            return None
+        for line in res.stdout.splitlines():
+            if line.startswith("LYNDRIX_AI_FINGERPRINT="):
+                return line.split("=", 1)[1].strip() or None
+        return None
+
     def bridge_url(self) -> str:
         return f"http://{CONTAINER_NAME}:{BRIDGE_PORT}"
 
@@ -142,11 +155,13 @@ class RunnerManager:
         self.last_error = None
         self.client = BridgeClient(self.bridge_url(), cfg.bridge_token)
         state = await asyncio.to_thread(self.container_state)
+        if self._fingerprint is None and state is not None:
+            self._fingerprint = await asyncio.to_thread(self.container_fingerprint)
         changed = self._fingerprint != cfg.fingerprint()
         try:
             if force or changed or state is None:
                 if state is not None:
-                    log.info(f"Runner: recreating {CONTAINER_NAME} ({'forced' if force else 'configuration changed' if changed else 'missing'})")
+                    log.info(f"Runner: recreating {CONTAINER_NAME} ({'forced' if force else 'configuration changed'})")
                     await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME)
                 await self._spawn(cfg)
             elif state != "running":
@@ -167,6 +182,7 @@ class RunnerManager:
         env += [
             {"key": "LYNDRIX_AI_BRIDGE_TOKEN", "value": cfg.bridge_token},
             {"key": "LYNDRIX_AI_WORKSPACE", "value": "/workspace"},
+            {"key": "LYNDRIX_AI_FINGERPRINT", "value": cfg.fingerprint()},
             {"key": "PYTHONUNBUFFERED", "value": "1"},
         ]
         if cfg.model:

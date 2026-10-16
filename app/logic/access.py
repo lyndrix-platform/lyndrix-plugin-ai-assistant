@@ -62,7 +62,13 @@ def ensure_assistant_user() -> dict:
             extra_permissions=[],
         )
         s.add(user)
-        s.commit()
+        try:
+            s.commit()
+        except Exception as exc:  # noqa: BLE001 — a peer/parallel call created it first (1062)
+            s.rollback()
+            if "1062" not in str(exc) and "UNIQUE" not in str(exc).upper():
+                raise
+            return {"username": ASSISTANT_USERNAME, "created": False, "roles": ["bot", ASSISTANT_ROLE]}
     log.info(f"Created the assistant account '{ASSISTANT_USERNAME}' (bot).")
     return {"username": ASSISTANT_USERNAME, "created": True, "roles": ["bot", ASSISTANT_ROLE]}
 

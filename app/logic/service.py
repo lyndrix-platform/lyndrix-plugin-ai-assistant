@@ -45,6 +45,8 @@ class AiAssistantService:
         self.settings: dict[str, Any] = {}
         self._tables_ready = False
         self._bootstrap_lock = asyncio.Lock()
+        self._runner_lock = asyncio.Lock()       # one ensure() at a time — never two spawns
+        self._watchdog: asyncio.Task | None = None
         self._recorders: dict[str, asyncio.Task] = {}
         self._seqs: dict[str, int] = {}          # last bridge event seq seen per session
         self._health_cache: tuple[float, dict] | None = None
@@ -246,14 +248,32 @@ class AiAssistantService:
         runs inside it; sessions simply fail until a credential exists."""
         if self.runner is None:
             return {"status": "not_bound"}
-        cfg = await self.runner_config()
-        health = await self.runner.ensure(cfg, force=force)
-        self._health_cache = None
-        return health
+        async with self._runner_lock:
+            cfg = await self.runner_config()
+            health = await self.runner.ensure(cfg, force=force)
+            self._health_cache = None
+            return health
+
+    async def _runner_watchdog(self, interval: float = 60.0) -> None:
+        """Lease holder: bring the runner back when the image appears later, the
+        container died or the bridge stopped answering."""
+        while self.is_runner_host:
+            await asyncio.sleep(interval)
+            if not self.is_runner_host or self.runner is None:
+                break
+            try:
+                health = await self.runner.health()
+                if health.get("status") in ("not_started", "unreachable", "error"):
+                    await self.ensure_runner()
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Runner watchdog: {exc}")
 
     async def start_runner_role(self) -> None:
         """``on_lease`` acquired: this instance drives the container."""
         self.is_runner_host = True
+        if self._watchdog is None or self._watchdog.done():
+            create = getattr(self.ctx, "create_task", None) or asyncio.create_task
+            self._watchdog = create(self._runner_watchdog(), name="ai_assistant:runner_watchdog")
         if db_ready() and not self._tables_ready:
             await self.bootstrap()        # ends with ensure_runner()
         else:
