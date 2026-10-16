@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.venv/
+
+# Installed at plugin install time (requirements.txt)
+vendor/
+
+# Plugin React UI build toolchain — the built bundle app/ui/static/ui_bundle.js IS committed
+node_modules/
+
+# Generated docs build output (mkdocs site_dir)
+.cache/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
