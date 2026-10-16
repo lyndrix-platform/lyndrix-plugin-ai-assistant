@@ -2,6 +2,11 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.1.2] - 2026-10-16
+### Fixed
+- Login: the plugin's calls to the bridge used a 20 s timeout while the CLI may need up to 45 s for the URL and 90 s for the token exchange — a slow exchange ended in a 500 and the one-time token was lost. Timeouts are now aligned (UI ≥ plugin ≥ bridge) and connection errors while the container restarts answer 503 with Retry-After instead of a traceback.
+- Runner: the first image pull may take longer than 180 s on a slow host; the spawn now waits up to 10 min.
+
 ## [0.1.1] - 2026-10-16
 ### Fixed
 - Login: the authorization URL no longer carries the TUI hint text ("Hold Shift while selecting…") that the ANSI-stripped CLI output glued onto the `state` parameter — the pasted code failed the state check.

@@ -34,9 +34,15 @@ class BridgeClient:
     def _client(self, timeout: Optional[float] = None) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self.base_url, headers=self._headers, timeout=timeout or self._timeout)
 
-    async def _call(self, method: str, path: str, *, json: Any = None, params: dict | None = None) -> Any:
-        async with self._client() as c:
-            r = await c.request(method, path, json=json, params=params)
+    async def _call(self, method: str, path: str, *, json: Any = None, params: dict | None = None,
+                    timeout: Optional[float] = None) -> Any:
+        try:
+            async with self._client(timeout) as c:
+                r = await c.request(method, path, json=json, params=params)
+        except httpx.TimeoutException as exc:
+            raise BridgeError(504, f"runner did not answer within {timeout or self._timeout:.0f} s") from exc
+        except httpx.HTTPError as exc:   # connect errors while the container is (re)starting
+            raise BridgeError(503, f"runner unreachable: {exc}") from exc
         if r.status_code >= 400:
             try:
                 detail = r.json().get("detail", r.text)

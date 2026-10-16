@@ -45,8 +45,9 @@ class AuthSubmit(BaseModel):
 
 
 def _bridge_http(exc: BridgeError) -> HTTPException:
-    status = exc.status if exc.status in (400, 404, 409, 422) else 502
-    return HTTPException(status_code=status, detail=exc.detail)
+    status = exc.status if exc.status in (400, 404, 409, 422, 503, 504) else 502
+    headers = {"Retry-After": "10"} if status == 503 else None
+    return HTTPException(status_code=status, detail=exc.detail, headers=headers)
 
 
 def _owned(session_id: str, identity: ApiIdentity) -> dict:
@@ -105,7 +106,8 @@ def build_router() -> APIRouter:
     async def auth_start(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
         _require_runner()
         try:
-            return await ai_service.bridge()._call("POST", "/auth/start")
+            # the CLI needs a moment before it prints the URL (bridge waits up to 45 s)
+            return await ai_service.bridge()._call("POST", "/auth/start", timeout=75)
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
 
@@ -113,8 +115,9 @@ def build_router() -> APIRouter:
     async def auth_submit(payload: AuthSubmit, identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
         _require_runner()
         try:
+            # the bridge waits up to 90 s for the CLI to exchange the code for the token
             result = await ai_service.bridge()._call(
-                "POST", "/auth/submit", json={"auth_id": payload.auth_id, "code": payload.code.strip()},
+                "POST", "/auth/submit", json={"auth_id": payload.auth_id, "code": payload.code.strip()}, timeout=110,
             )
         except BridgeError as exc:
             raise _bridge_http(exc) from exc

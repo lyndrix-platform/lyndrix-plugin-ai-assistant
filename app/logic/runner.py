@@ -198,7 +198,7 @@ class RunnerManager:
             command=[ENTRYPOINT],
             remove=False,
             networks=[cfg.network] if cfg.network else [],
-            timeout=180.0,
+            timeout=600.0,          # first pull of the ~1 GB image on a slow host must not count as a failure
         )
         if not isinstance(result, dict) or result.get("status") not in ("running", "ok", "started"):
             raise RuntimeError(f"spawn failed: {(result or {}).get('error') if isinstance(result, dict) else result}")

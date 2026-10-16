@@ -230,8 +230,9 @@ export const assistantApi = {
 
   // Claude login (OAuth through the CLI inside the runner; admin only)
   // The CLI needs a few seconds (sometimes >20 s) before it prints the login URL.
-  authStart: () => pluginApi.post<AuthStart>('auth/start', undefined, 60_000),
-  authSubmit: (auth_id: string, code: string) => pluginApi.post<AuthSubmitOut>('auth/submit', { auth_id, code }),
+  authStart: () => pluginApi.post<AuthStart>('auth/start', undefined, 90_000),
+  // Exchanging the code can take a while (CLI → Anthropic); never give up before the backend does.
+  authSubmit: (auth_id: string, code: string) => pluginApi.post<AuthSubmitOut>('auth/submit', { auth_id, code }, 130_000),
   authStatus: () => pluginApi.get<AuthStatus>('auth/status'),
 
   // Sessions
