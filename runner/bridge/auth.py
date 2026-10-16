@@ -37,7 +37,7 @@ URL_RE = re.compile(r"https://[A-Za-z0-9.\-]+/[^\s\"'<>]*oauth[^\s\"'<>]*")
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{20,}")
 ANY_TOKEN_RE = re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")
 ERROR_RE = re.compile(r"(OAuth error[^\n]*|Invalid code[^\n]*|Error:[^\n]*|(?i:failed to [^\n]*|invalid[_ ]grant[^\n]*|expired[^\n]*|unauthori[sz]ed[^\n]*))")
-ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=>]")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?<=>]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b[=>]|[\x0e\x0f]")
 # The ink renderer positions the hint lines after the URL with cursor moves, not
 # newlines, so after ANSI stripping the next hint ("Hold Shift while selecting…",
 # "Paste code here if prompted >") is glued to the URL. Cut it off there.
@@ -125,11 +125,15 @@ class AuthFlowManager:
         expires_in: int = 600,
         url_timeout: float = 45.0,
         submit_timeout: float = 90.0,
+        enter_delay: float = 0.4,
+        nudge_after: float = 10.0,
     ) -> None:
         self._cli_path = cli_path
         self.expires_in = expires_in
         self.url_timeout = url_timeout
         self.submit_timeout = submit_timeout
+        self.enter_delay = enter_delay
+        self.nudge_after = nudge_after
         self._flow: AuthFlow | None = None
         self._lock = asyncio.Lock()
 
@@ -187,7 +191,11 @@ class AuthFlowManager:
                 raise AuthFlowError(f"flow is not awaiting a code (phase {flow.phase})")
             mark = max(0, len(flow.text()) - 64)
             try:
-                os.write(flow.master_fd, (code.strip() + "\r").encode())
+                # The code alone first: ~90 characters arriving at once are treated as a
+                # paste by the input component, and an Enter inside that chunk is swallowed
+                # (seen live: the CLI echoed the masked code and waited). Enter follows
+                # separately from the exchange task.
+                os.write(flow.master_fd, code.strip().encode())
             except OSError as exc:
                 await self._terminate(flow)
                 raise AuthFlowError(f"could not write code to the CLI: {exc}") from exc
@@ -200,7 +208,16 @@ class AuthFlowManager:
             tail = text[mark:]
             return TOKEN_RE.search(tail) or ERROR_RE.search(tail)
 
-        match = await self._wait_for(flow, outcome, self.submit_timeout)
+        await asyncio.sleep(self.enter_delay)
+        self._press_enter(flow)
+        # No reaction after a while → the Enter was lost (paste detection); press it again once.
+        match = await self._wait_for(flow, outcome, min(self.nudge_after, self.submit_timeout))
+        if match is None and not flow.finished:
+            before = len(flow.text())
+            self._press_enter(flow)
+            log.info("login flow: no reaction to the code yet, pressed Enter again",
+                     extra={"ctx": {"auth_id": flow.auth_id, "output_chars": before}})
+            match = await self._wait_for(flow, outcome, max(1.0, self.submit_timeout - self.nudge_after))
         if flow.finished:
             return
         if match is None:
@@ -217,6 +234,15 @@ class AuthFlowManager:
         flow.phase = "done" if flow.result.get("ok") else "failed"
         # The CLI is no longer needed; the outcome stays claimable until expiry.
         await self._stop_process(flow)
+
+    @staticmethod
+    def _press_enter(flow: AuthFlow) -> None:
+        if flow.master_fd is None:
+            return
+        try:
+            os.write(flow.master_fd, b"\r")
+        except OSError:
+            pass
 
     async def result(self, auth_id: str) -> dict[str, Any]:
         """The outcome of the exchange — the token is handed out exactly once."""

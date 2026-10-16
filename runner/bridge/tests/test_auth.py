@@ -33,7 +33,23 @@ print("")
 print("https://claude.com/cai/oauth/authorize?code=true&client_id=abc&state=xyz")
 print("")
 print("Paste code here if prompted >", end="", flush=True)
-code = sys.stdin.readline().strip()
+if mode == "paste":
+    # like the real input component: a chunk that ends with CR/LF is a paste — the
+    # newline inside it does not submit; only a *separate* Enter does.
+    import os, select
+    chunk = os.read(0, 4096).decode()
+    code = chunk.strip()
+    while True:
+        r, _, _ = select.select([0], [], [], 25)
+        if not r:
+            sys.exit(3)
+        nxt = os.read(0, 4096).decode()
+        if "\\r" in nxt or "\\n" in nxt:
+            code = (code + nxt.replace("\\r", "").replace("\\n", "")).strip()
+            break
+        code += nxt
+else:
+    code = sys.stdin.readline().strip()
 if code == "good-code":
     print("")
     print("{FAKE_TOKEN}")
@@ -167,3 +183,11 @@ def test_clean_url_cuts_glued_hint_text():
     assert clean_url(glued).endswith("&state=YTcDvX8-OnbuTmG06pIQm2yklvxuOTtW33Opo6klaPk")
     assert clean_url("https://claude.com/x?state=abcPastecodehereifprompted>") == "https://claude.com/x?state=abc"
     assert clean_url("https://claude.com/x?state=abc") == "https://claude.com/x?state=abc"
+
+
+async def test_enter_is_sent_separately_for_paste_detection(fake_cli):
+    flows = AuthFlowManager(fake_cli("paste"), url_timeout=10, submit_timeout=10, enter_delay=0.2, nudge_after=2)
+    started = await flows.start()
+    await flows.submit(started["auth_id"], "good-code")
+    outcome = await _outcome(flows, started["auth_id"], timeout=12)
+    assert outcome == {"ok": True, "token": FAKE_TOKEN}

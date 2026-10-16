@@ -2,6 +2,10 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.1.5] - 2026-10-16
+### Fixed
+- Login: the code and Enter were written to the CLI in one chunk; the input treats ~90 characters arriving at once as a paste and swallowed the Enter — the CLI echoed the masked code and waited forever (seen live). Enter is now sent separately after 0.4 s and pressed again once if nothing happens within 10 s. Runner image 0.1.4.
+
 ## [0.1.4] - 2026-10-16
 ### Changed
 - Login: the code exchange is asynchronous. `POST /auth/submit` answers 202, the runner exchanges the code in the background, the plugin claims the token once (`POST /auth/result`) and stores it; the UI polls `/auth/status` (`last_result`). Long requests through the load balancer were cut after about a minute ("Failed to fetch") and the one-time token was lost.
