@@ -27,8 +27,11 @@ Browser ──(SSE/REST)── Core-Instanz mit Rolle `runner` ──(HTTP, X-Br
   Session beim nächsten Senden unter derselben ID neu an (`resume` mit der gemerkten Claude-Session).
 - **Workspace**: lokales Git-Repository auf dem geteilten Speicher; optional ein Remote
   (`workspace_repo_url`, Token nur pro Git-Befehl). `CLAUDE.md` wird generiert aus
-  Grundinstruktionen, je einer Datei `.lyndrix/instructions/<plugin>.md` pro Plugin mit
-  `ai_instructions` im Manifest und den Operator-Notizen (`extra_instructions`).
+  Grundinstruktionen, einem **Index der installierten Plugins** (Zweck aus `ai_instructions`,
+  URL der vollständigen Anleitung aus `ai_instructions_route`, Core-API 1.12) und den
+  Operator-Notizen (`extra_instructions`). Die Anleitung selbst liefert jedes Plugin live
+  (`GET /api/plugins/<id>/ai/instructions`); der Assistent holt sie bei Bedarf und legt sie
+  versioniert unter `.lyndrix/cache/` ab – es gibt keine kopierten Texte im Workspace.
 
 ## Anmeldung bei Claude
 

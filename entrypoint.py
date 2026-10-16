@@ -22,7 +22,7 @@ PLUGIN_ID = "lyndrix.plugin.ai_assistant"
 manifest = ModuleManifest(
     id=PLUGIN_ID,
     name="KI-Assistent",
-    version="0.1.6",
+    version="0.2.0",
     description="Claude Code als Assistent in Lyndrix: Chat, Werkzeug-Freigaben, Plugin-Wissen.",
     author="Lyndrix",
     icon="smart_toy",
@@ -44,14 +44,14 @@ manifest = ModuleManifest(
         "description": "Chat mit dem KI-Assistenten als schwebendes Fenster.",
         "default_size": {"width": 440, "height": 620},
     }],
+    # Short purpose for the AI index (core API 1.12); the full guide is served live
+    # from ai/INSTRUCTIONS.md at /ai/instructions.
     ai_instructions=(
-        "You are talking to the operator through the AI Assistant plugin. Your own Lyndrix "
-        "identity is the user `ai-assistant`; `LYNDRIX_API_URL` and `LYNDRIX_API_KEY` in your "
-        "environment let you call the Lyndrix REST API (bearer key) with exactly the permissions "
-        "the operator granted that user — try `GET /api/me/access` to see them. Allowed Vault "
-        "spaces are listed at `GET /api/plugins/lyndrix.plugin.ai_assistant/vault/spaces` and read "
-        "at `/vault/spaces/<space>`; never echo their values back into the chat."
+        "The AI assistant itself: Claude Code in a sandboxed runner container, chat sessions, "
+        "tool approvals and the allowed Vault spaces. Reach for it to inspect your own access "
+        "(`GET /api/me/access`), the runner status and the Vault spaces the operator opened for you."
     ),
+    ai_instructions_route="/ai/instructions",
     permissions={
         "subscribe": ["db:connected", "vault:ready_for_data", "system:boot_complete",
                       "plugin:settings_changed", "plugin:state_changed", "socket:response"],

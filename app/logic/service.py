@@ -26,6 +26,7 @@ from .workspace import WorkspaceManager
 
 log = get_logger("Plugin:AI:Service")
 
+PLUGIN_VERSION = "0.2.0"              # kept in sync with entrypoint.manifest.version by tests
 PROVIDERS = ("claude-code",)           # "hermes" follows once the Hermes provider exists
 PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions")
 DEFAULT_IMAGE = "ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest"

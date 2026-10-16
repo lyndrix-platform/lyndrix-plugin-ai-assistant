@@ -83,6 +83,17 @@ def build_router() -> APIRouter:
         text = await asyncio.to_thread(ai_service.workspace.read_instructions) if ai_service.workspace else ""
         return {"markdown": text}
 
+    @router.get("/ai/instructions")
+    async def ai_instructions(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
+        """This plugin's own full AI guide (core API 1.12 contract: served live from the repo file)."""
+        from pathlib import Path
+
+        from ..logic.service import PLUGIN_VERSION
+
+        path = Path(__file__).resolve().parents[2] / "ai" / "INSTRUCTIONS.md"
+        text = await asyncio.to_thread(lambda: path.read_text(encoding="utf-8") if path.is_file() else "")
+        return {"plugin_id": PLUGIN_ID, "version": PLUGIN_VERSION, "format": "markdown", "markdown": text}
+
     @router.post("/workspace/sync")
     async def workspace_sync(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
         await asyncio.to_thread(ai_service.reload_settings)

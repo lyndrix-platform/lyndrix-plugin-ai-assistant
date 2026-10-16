@@ -2,6 +2,12 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.2.0] - 2026-10-16
+### Changed
+- Instructions: `CLAUDE.md` no longer copies every plugin's `ai_instructions`. It carries the base instructions plus a generated **index** of the installed plugins (id, version, purpose, URL of the full guide) and the rule to fetch a plugin's guide from the running plugin before operating it, cached per version under `.lyndrix/cache/` (git-ignored). The pre-0.2 copies in `.lyndrix/instructions/` are removed on sync. Needs core API 1.12 for `ai_instructions_route`/`GET /api/ai/plugins`; on 1.11 only purposes are listed.
+### Added
+- Own full guide at `GET /ai/instructions` (served live from `ai/INSTRUCTIONS.md`), manifest `ai_instructions_route`.
+
 ## [0.1.6] - 2026-10-16
 ### Fixed
 - Login: the token parsed from the CLI output could carry the next hint sentence glued to it (the TUI draws the following line with cursor moves, not newlines) — it was stored and every chat turn failed with `401 OAuth access token is invalid` while the settings page said "verified". The bridge now turns cursor moves into line breaks, validates a parsed token with one tiny headless turn before handing it out, and a failed validation reports the scrubbed output tail.
