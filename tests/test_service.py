@@ -42,6 +42,8 @@ class _FakeBridge:
         self.created = []
         self.sent = []
         self.events = {}
+        self.lost = set()        # session ids the bridge forgot (runner restart)
+        self.last_seq = {}
 
     async def create_session(self, payload):
         self.created.append(payload)
@@ -50,6 +52,13 @@ class _FakeBridge:
     async def send_message(self, sid, content):
         self.sent.append((sid, content))
         return {"accepted": True}
+
+    async def get_session(self, sid):
+        if sid in self.lost:
+            from ai_plugin.app.logic.bridge import BridgeError
+
+            raise BridgeError(404, "unknown session")
+        return {"session_id": sid, "last_seq": self.last_seq.get(sid, 0)}
 
     async def iter_events(self, sid, after=0):
         for ev in self.events.get(sid, []):
@@ -137,8 +146,9 @@ def test_session_lifecycle_and_transcript(db):
         assert abs(row.total_cost_usd - 0.0123) < 1e-9
         assert row.title.startswith("What is in the workspace")
         kinds = [(m.role, m.kind) for m in s.query(AiMessage).filter(AiMessage.session_id == sid).order_by(AiMessage.id)]
-    assert kinds == [("user", "text"), ("assistant", "tool_use"), ("tool", "tool_result"),
-                     ("system", "approval"), ("assistant", "text"), ("system", "result")]
+    # text that arrived before a tool call is stored before the tool card (chat order)
+    assert kinds == [("user", "text"), ("assistant", "text"), ("assistant", "tool_use"), ("tool", "tool_result"),
+                     ("system", "approval"), ("system", "result")]
     msgs = svc.messages(sid)
     assert [m["content"] for m in msgs if m["kind"] == "text"] == ["What is in the workspace README?", "Let me check."]
     assert svc.list_sessions("marvin")[0]["id"] == sid and svc.list_sessions("someone-else") == []
@@ -163,3 +173,31 @@ def test_error_event_ends_the_turn(db):
         errors = [m for m in s.query(AiMessage).filter(AiMessage.session_id == sid) if m.kind == "error"]
         assert errors and "invalid bearer token" in errors[0].content
     assert service_mod.PERMISSION_MODES[0] == "default"
+
+
+def test_bridge_session_recreated_after_runner_restart(db):
+    bridge = _FakeBridge()
+    svc = _svc(_Ctx({}), bridge)
+
+    async def run():
+        s = await svc.create_session("marvin", "Test")
+        sid = s["id"]
+        bridge.events[sid] = [{"seq": 1, "type": "result", "data": {"subtype": "success", "claude_session_id": "cs-9", "result": "done"}}]
+        await svc.send_message(sid, "marvin", "first")
+        await asyncio.wait_for(svc._recorders[sid], 5)
+        # runner restarted: the bridge forgot the session, the DB still has it
+        bridge.lost.add(sid)
+        bridge.events[sid] = [{"seq": 1, "type": "result", "data": {"subtype": "success"}}]
+        await svc.send_message(sid, "marvin", "second")
+        await asyncio.wait_for(svc._recorders[sid], 5)
+        return sid
+
+    sid = asyncio.run(run())
+    assert len(bridge.created) == 2
+    recreated = bridge.created[1]
+    assert recreated["session_id"] == sid and recreated["resume"] == "cs-9" and recreated["user"] == "marvin"
+    with db() as s:
+        row = s.get(AiSession, sid)
+        assert row.turns == 2
+        results = [m for m in s.query(AiMessage).filter(AiMessage.session_id == sid) if m.kind == "result"]
+        assert results[0].meta["result"] == "done"

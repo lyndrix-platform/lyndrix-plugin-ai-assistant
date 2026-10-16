@@ -115,6 +115,9 @@ class AiAssistantService:
                     log.error(f"Table bootstrap failed — {exc}")
             await asyncio.to_thread(self.reload_settings)
             await self.sync_workspace()
+        if self.is_runner_host:
+            # The agent's API key only exists once the DB is up — (re)apply the env now.
+            await self.ensure_runner()
 
     async def sync_workspace(self) -> dict:
         if self.workspace is None:
@@ -184,9 +187,12 @@ class AiAssistantService:
         except Exception as exc:  # noqa: BLE001
             log.warning(f"Assistant account/API key not available — {exc}")
             return {}
-        import socket
+        url = str(self.setting("agent_api_url") or "").strip()
+        if not url:
+            import socket
 
-        url = str(self.setting("agent_api_url") or f"http://{socket.gethostname()}:8081")
+            name = await asyncio.to_thread(self.runner.own_container_name) if self.runner else None  # type: ignore[union-attr]
+            url = f"http://{name or socket.gethostname()}:8081"
         return {"LYNDRIX_API_URL": url, "LYNDRIX_API_KEY": str(key)}
 
     @staticmethod
@@ -235,12 +241,11 @@ class AiAssistantService:
         log.info(f"ACCESS: '{who}' read {what}")
 
     async def ensure_runner(self, *, force: bool = False) -> dict:
-        """Lease holder only: make the container match the settings."""
+        """Lease holder only: make the container match the settings. The runner
+        also starts without a Claude credential — the login flow (``/auth/*``)
+        runs inside it; sessions simply fail until a credential exists."""
         if self.runner is None:
             return {"status": "not_bound"}
-        if not self.auth_env():
-            self.runner.last_error = "no Claude credential configured (claude_oauth_token or anthropic_api_key)"
-            return {"status": "unconfigured", "error": self.runner.last_error}
         cfg = await self.runner_config()
         health = await self.runner.ensure(cfg, force=force)
         self._health_cache = None
@@ -249,7 +254,10 @@ class AiAssistantService:
     async def start_runner_role(self) -> None:
         """``on_lease`` acquired: this instance drives the container."""
         self.is_runner_host = True
-        await self.ensure_runner()
+        if db_ready() and not self._tables_ready:
+            await self.bootstrap()        # ends with ensure_runner()
+        else:
+            await self.ensure_runner()
 
     async def stop_runner_role(self) -> None:
         """``on_lease`` lost: stop driving (the container keeps running for the peer)."""
@@ -376,9 +384,39 @@ class AiAssistantService:
 
         if self.is_ready:
             await asyncio.to_thread(retry_write, _record_user)
+        await self._ensure_bridge_session(session_id, owner)
         result = await self.bridge().send_message(session_id, content)
         self._start_recorder(session_id)
         return result or {"accepted": True}
+
+    async def _ensure_bridge_session(self, session_id: str, owner: str) -> None:
+        """The bridge keeps sessions in memory: after a runner restart (or a core
+        restart) the DB row exists but the bridge has never heard of it. Recreate
+        it under the same id, resuming the Claude conversation when we know it,
+        and align the recorder's event cursor so old events are not re-recorded."""
+        bridge = self.bridge()
+        try:
+            live = await bridge.get_session(session_id)
+        except BridgeError as exc:
+            if exc.status != 404:
+                raise
+            row = self.get_session(session_id) or {}
+            mode = row.get("permission_mode") or str(self.setting("permission_mode", "default"))
+            payload = {
+                "session_id": session_id, "user": owner, "title": row.get("title") or "Unterhaltung",
+                "cwd": "/workspace", "permission_mode": mode if mode in PERMISSION_MODES else "default",
+                "model": self.setting("model") or None, "policy": self.guardrail_policy(),
+                "resume": row.get("claude_session_id") or None,
+            }
+            max_turns = self.setting("max_turns")
+            if max_turns:
+                payload["max_turns"] = int(max_turns)
+            await bridge.create_session(payload)
+            self._seqs.pop(session_id, None)
+            log.info(f"Recreated bridge session {session_id[:8]} (resume={'yes' if payload['resume'] else 'no'})")
+            return
+        if session_id not in self._seqs:
+            self._seqs[session_id] = int((live or {}).get("last_seq") or 0)
 
     async def approve(self, session_id: str, approval_id: str, decision: str,
                       updated_input: dict | None = None, message: str | None = None) -> dict:
@@ -429,6 +467,9 @@ class AiAssistantService:
                     else:
                         text_parts = [str(data.get("text") or "")]
                 elif kind == "tool_use":
+                    if "".join(text_parts).strip():      # keep text and tool cards in order
+                        await self._store(session_id, "assistant", "text", "".join(text_parts).strip()[:TRANSCRIPT_MAX_CHARS * 4], None)
+                        text_parts = []
                     await self._store(session_id, "assistant", "tool_use", None,
                                       {"name": data.get("name"), "input": data.get("input"), "tool_use_id": data.get("tool_use_id")})
                 elif kind == "tool_result":
@@ -508,9 +549,12 @@ class AiAssistantService:
                         if result.get("claude_session_id"):
                             row.claude_session_id = str(result["claude_session_id"])
                 if result:
+                    meta = {k: result.get(k) for k in ("subtype", "duration_ms", "total_cost_usd", "num_turns",
+                                                       "is_error", "terminal_reason", "stop_reason")}
+                    if result.get("result"):            # the CLI's final text (error description on is_error)
+                        meta["result"] = str(result["result"])[:2000]
                     s.add(AiMessage(session_id=session_id, role="system", kind="result", content=None,
-                                    meta={k: result.get(k) for k in ("subtype", "duration_ms", "total_cost_usd", "num_turns", "is_error")},
-                                    created_at=now))
+                                    meta=meta, created_at=now))
                 s.commit()
 
         await asyncio.to_thread(retry_write, _tx)

@@ -18,7 +18,13 @@ Browser ──(SSE/REST)── Core-Instanz mit Rolle `runner` ──(HTTP, X-Br
   erzeugt/aktualisiert den Container; alle beantworten die API gegen denselben Container.
 - **Runner-Container** `lyndrix-ai-runner` (Image `ghcr.io/lyndrix-platform/lyndrix-ai-runner`):
   langlebig, wird neu erzeugt, wenn Image, Zugangsdaten, Modell oder Workspace-Pfad wechseln.
-  Er hängt am Docker-Netzwerk der Core-Instanz und ist nur dort erreichbar.
+  Er hängt am Docker-Netzwerk der Core-Instanz und ist nur dort erreichbar. Er läuft als Benutzer
+  `agent` (uid/gid 10000); der Core übergibt den Workspace-Baum nach jedem Sync an diesen Benutzer.
+  Das benannte Volume `lyndrix-ai-runner-home` hält `/home/agent/.claude` (Claude-Konfiguration und
+  Verlauf), damit eine Unterhaltung nach einem Neustart per `resume` fortgesetzt werden kann. Der
+  Runner startet auch ohne Claude-Zugangsdaten — der Login läuft in ihm.
+- **Sessions**: Die Bridge hält Sessions nur im Speicher. Nach einem Neustart legt das Plugin eine
+  Session beim nächsten Senden unter derselben ID neu an (`resume` mit der gemerkten Claude-Session).
 - **Workspace**: lokales Git-Repository auf dem geteilten Speicher; optional ein Remote
   (`workspace_repo_url`, Token nur pro Git-Befehl). `CLAUDE.md` wird generiert aus
   Grundinstruktionen, je einer Datei `.lyndrix/instructions/<plugin>.md` pro Plugin mit

@@ -26,7 +26,11 @@ from .bridge import BridgeClient
 log = get_logger("Plugin:AI:Runner")
 
 CONTAINER_NAME = "lyndrix-ai-runner"
+HOME_VOLUME = "lyndrix-ai-runner-home"     # /home/agent/.claude — transcripts survive a recreate (resume)
+ENTRYPOINT = "/opt/bridge/entrypoint.sh"   # the socket manager clears the image ENTRYPOINT, so pass it as command
 BRIDGE_PORT = 8765
+AGENT_UID = 10000                           # user `agent` in the runner image (Dockerfile ARG AGENT_UID/GID)
+AGENT_GID = 10000
 _CGROUP_ID_RE = re.compile(r"containers/([0-9a-f]{64})")
 
 
@@ -113,6 +117,16 @@ class RunnerManager:
         return nets[0] if nets else None
 
     @staticmethod
+    def own_container_name() -> Optional[str]:
+        """Name of this core container — resolvable by the runner on the shared network."""
+        cid = _own_container_id()
+        if not cid:
+            return None
+        res = _docker("inspect", "-f", "{{.Name}}", cid, timeout=15)
+        name = res.stdout.strip().lstrip("/") if res.returncode == 0 else ""
+        return name or None
+
+    @staticmethod
     def container_state() -> Optional[str]:
         """``running`` / ``exited`` / … or ``None`` when the container does not exist."""
         res = _docker("inspect", "-f", "{{.State.Status}}", CONTAINER_NAME, timeout=15)
@@ -161,8 +175,11 @@ class RunnerManager:
             image=cfg.image,
             name=CONTAINER_NAME,
             env_vars=env,
-            mounts=[{"source": cfg.host_workspace, "target": "/workspace", "mode": "rw"}],
-            command=None,
+            mounts=[
+                {"source": cfg.host_workspace, "target": "/workspace", "mode": "rw"},
+                {"source": HOME_VOLUME, "target": "/home/agent/.claude", "mode": "rw"},
+            ],
+            command=[ENTRYPOINT],
             remove=False,
             networks=[cfg.network] if cfg.network else [],
             timeout=180.0,

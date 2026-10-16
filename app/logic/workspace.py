@@ -11,6 +11,7 @@ All functions are blocking (git subprocesses) — call them via ``asyncio.to_thr
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +95,7 @@ class WorkspaceManager:
                     encoding="utf-8",
                 )
             summary = write_instructions(self.repo, collect_plugin_instructions(), extra_instructions)
+            self.ensure_agent_access()
             self.last_sync = datetime.now(timezone.utc)
             return {"ok": True, **summary, **self.status()}
         except Exception as exc:  # noqa: BLE001 — surfaced in the status, never raised into setup()
@@ -136,7 +138,34 @@ class WorkspaceManager:
         if not (self.repo / ".git").is_dir():
             return {"ok": False, "error": "workspace not initialized"}
         summary = write_instructions(self.repo, collect_plugin_instructions(), extra_instructions)
+        self.ensure_agent_access()
         return {"ok": True, **summary}
+
+    def ensure_agent_access(self, uid: int = 10000, gid: int = 10000) -> None:
+        """The runner container works as user ``agent`` (uid/gid 10000); the core
+        creates the files as root. Hand the tree over when we may (root), otherwise
+        fall back to group/world-writable bits so the agent can still edit."""
+        if not self.root.exists():
+            return
+        try:
+            if os.geteuid() == 0:
+                for dirpath, dirnames, filenames in os.walk(self.root):
+                    os.chown(dirpath, uid, gid)
+                    for name in filenames:
+                        try:
+                            os.chown(os.path.join(dirpath, name), uid, gid)
+                        except OSError:
+                            pass
+                return
+        except OSError as exc:
+            log.warning(f"Workspace chown to {uid}:{gid} failed ({exc}); falling back to permission bits.")
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            try:
+                os.chmod(dirpath, 0o2777)
+                for name in filenames:
+                    os.chmod(os.path.join(dirpath, name), 0o666)
+            except OSError:
+                pass
 
     def read_instructions(self) -> str:
         p = self.repo / "CLAUDE.md"

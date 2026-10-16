@@ -1,0 +1,110 @@
+name: Runner image
+
+# Builds runner/ (Claude Code + bridge) and publishes
+# ghcr.io/lyndrix-platform/lyndrix-ai-runner:<runner/VERSION>, :<major.minor>, :sha-<sha> and :latest.
+# The bridge test suite runs inside the freshly built image before anything is pushed.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "runner/**"
+      - ".github/workflows/runner-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: lyndrix-platform/lyndrix-ai-runner
+
+concurrency:
+  group: runner-image-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve runner version
+        id: version
+        run: |
+          VERSION="$(tr -d '[:space:]' < runner/VERSION)"
+          if [ -z "$VERSION" ]; then
+            echo "runner/VERSION is empty"
+            exit 1
+          fi
+          MINOR="$(printf '%s' "$VERSION" | cut -d. -f1,2)"
+          IS_PRERELEASE="false"
+          if printf '%s' "$VERSION" | grep -Eq '[-+]'; then
+            IS_PRERELEASE="true"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "minor=$MINOR" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.minor }}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ steps.version.outputs.is_prerelease != 'true' && github.ref == 'refs/heads/main' }}
+
+      - name: Build image (local)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./runner
+          file: ./runner/Dockerfile
+          load: true
+          tags: lyndrix-ai-runner:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run bridge test suite inside the image
+        run: |
+          docker run --rm --entrypoint /opt/bridge/venv/bin/python lyndrix-ai-runner:ci \
+            -m pytest /opt/bridge/bridge/tests -q
+
+      - name: Smoke test /health
+        run: |
+          docker run -d --name runner-smoke -e LYNDRIX_AI_BRIDGE_TOKEN=ci -p 127.0.0.1:18765:8765 lyndrix-ai-runner:ci
+          for i in $(seq 1 30); do
+            if curl -fsS -H 'X-Bridge-Token: ci' http://127.0.0.1:18765/health > health.json; then break; fi
+            sleep 1
+          done
+          cat health.json
+          docker logs runner-smoke
+          docker rm -f runner-smoke
+          test "$(jq -r .claude_version health.json)" = "$(docker run --rm --entrypoint claude lyndrix-ai-runner:ci --version | cut -d' ' -f1)"
+
+      - name: Log in to Registry
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./runner
+          file: ./runner/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
