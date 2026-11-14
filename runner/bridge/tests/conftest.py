@@ -16,6 +16,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # runner/ → "import bridge"
 
+try:  # the runner image has the real SDK; elsewhere a test-local stub stands in
+    import claude_agent_sdk  # noqa: F401
+except ModuleNotFoundError:
+    from . import sdk_stub
+
+    sys.modules["claude_agent_sdk"] = sdk_stub
+
 from claude_agent_sdk import (  # noqa: E402
     AssistantMessage,
     ResultMessage,
