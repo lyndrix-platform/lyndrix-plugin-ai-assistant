@@ -162,6 +162,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.claude_version = await provider.version()
+        probe_flags = getattr(provider, "probe_flags", None)
+        cli_flags = await probe_flags() if callable(probe_flags) else frozenset()
         kind, warnings = detect_auth(settings.credential_env)
         log.info(
             "bridge ready",
@@ -173,6 +175,7 @@ def create_app(
                     "auth": kind,
                     "workspace": settings.workspace,
                     "token_configured": bool(settings.bridge_token),
+                    "strict_mcp_config": "--strict-mcp-config" in cli_flags,
                     "warnings": warnings,
                 }
             },

@@ -58,6 +58,9 @@ log = logging.getLogger("bridge.claude")
 warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
 PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions", "plan", "auto")
+# MCP servers only from --mcp-config (we pass none): the shared, agent-writable
+# ~/.claude.json can define per-project MCP servers that would start in every session.
+STRICT_MCP_FLAG = "--strict-mcp-config"
 # "auto" is the bridge's own mode: the CLI runs in "default" (so every call still
 # reaches can_use_tool and the deny/ask rules apply) and the fallback for an
 # unmatched call is "allow". Unlike bypassPermissions it never shadows the policy.
@@ -333,6 +336,7 @@ def build_options(
     cli_path: str | None,
     stderr: Callable[[str], None] | None = None,
     guard: GuardCallback | None = None,
+    extra_flags: tuple[str, ...] = (),
 ) -> ClaudeAgentOptions:
     """Translate a session spec into SDK options.
 
@@ -361,6 +365,8 @@ def build_options(
         cli_path=cli_path,
         env=settings.cli_env(),
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use_hook(guard)])]} if guard else None,
+        # boolean CLI flags (value None); only flags the installed CLI was seen to support
+        extra_args={flag.lstrip("-"): None for flag in extra_flags},
         # NOT options.user: in 0.2.168 the transport forwards it as a subprocess
         # kwarg ("unexpected kwargs: user"); the bridge tracks the user itself.
         stderr=stderr,
@@ -396,6 +402,23 @@ class ClaudeCodeProvider:
         self._settings = settings
         self.cli_path = settings.claude_bin or shutil.which("claude")
         self.sdk_version = SDK_VERSION
+        self.cli_flags: frozenset[str] = frozenset()
+
+    async def probe_flags(self) -> frozenset[str]:
+        """Long options the installed CLI lists in ``claude --help``. Optional hardening
+        flags are passed only when known: an unknown flag would fail every session."""
+        if not self.cli_path:
+            return frozenset()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.cli_path, "--help", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except Exception as exc:  # noqa: BLE001 - optional flags are simply not used
+            log.warning("claude --help failed", extra={"ctx": {"error": str(exc)}})
+            return frozenset()
+        self.cli_flags = frozenset(re.findall(r"--[a-z][a-z0-9-]+", out.decode(errors="ignore")))
+        return self.cli_flags
 
     async def version(self) -> str | None:
         """``claude --version`` → "2.1.301"; ``None`` when the CLI is unusable."""
@@ -428,7 +451,8 @@ class ClaudeCodeProvider:
             log.info("claude stderr", extra={"ctx": {"user": spec.user, "line": line[:500]}})
 
         options = build_options(
-            spec, self._settings, can_use_tool=can_use_tool, cli_path=self.cli_path, stderr=on_stderr, guard=guard
+            spec, self._settings, can_use_tool=can_use_tool, cli_path=self.cli_path, stderr=on_stderr, guard=guard,
+            extra_flags=(STRICT_MCP_FLAG,) if STRICT_MCP_FLAG in self.cli_flags else (),
         )
         client = ClaudeSDKClient(options)
         await client.connect()

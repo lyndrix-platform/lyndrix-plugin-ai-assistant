@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from bridge import hardening
@@ -194,3 +195,53 @@ async def test_old_plugins_without_a_system_prompt_still_get_the_workspace_instr
     (tmp_path / "CLAUDE.md").unlink()
     (tmp_path / "CLAUDE.md").symlink_to("/etc/hostname")
     assert legacy_workspace_instructions(str(tmp_path)) is None
+
+
+async def test_strict_mcp_config_is_passed_only_when_the_cli_knows_it(tmp_path):
+    """The shared ~/.claude.json can define per-project MCP servers; --strict-mcp-config makes
+    the CLI ignore them — but an unknown flag would fail every session, so probe first."""
+    from bridge.claude_provider import STRICT_MCP_FLAG, ClaudeCodeProvider
+
+    cli = tmp_path / "claude"
+    cli.write_text("#!/bin/sh\necho 'Options:\n  --strict-mcp-config  Only use MCP servers from --mcp-config\n  --print'\n")
+    cli.chmod(0o755)
+    provider = ClaudeCodeProvider(Settings(claude_bin=str(cli), workspace=str(tmp_path)))
+    flags = await provider.probe_flags()
+    assert STRICT_MCP_FLAG in flags and "--mcp-config" in flags
+    opts = build_options(SessionSpec(user="a", cwd=str(tmp_path)), Settings(workspace=str(tmp_path)),
+                         can_use_tool=None, cli_path=None, extra_flags=(STRICT_MCP_FLAG,))
+    assert opts.extra_args == {"strict-mcp-config": None}
+    assert build_options(SessionSpec(user="a", cwd=str(tmp_path)), Settings(workspace=str(tmp_path)),
+                         can_use_tool=None, cli_path=None).extra_args == {}
+    old = tmp_path / "old-claude"
+    old.write_text("#!/bin/sh\necho 'Options:\n  --print'\n")
+    old.chmod(0o755)
+    assert STRICT_MCP_FLAG not in await ClaudeCodeProvider(Settings(claude_bin=str(old))).probe_flags()
+
+
+def test_the_real_sdk_passes_the_isolation_flags_to_the_cli(tmp_path):
+    """Runs where the real claude-agent-sdk is installed (inside the runner image in CI);
+    skipped with the stub. Guards the assumptions AI-04/AI-07 rest on: an empty
+    setting_sources list must reach the CLI as `--setting-sources ""` (a truthiness check in
+    the SDK would drop the flag and silently load the workspace settings again)."""
+    import claude_agent_sdk
+
+    if getattr(claude_agent_sdk, "__version__", "").endswith("-stub"):
+        pytest.skip("real claude-agent-sdk not installed")
+    try:
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+    except ImportError as exc:  # pragma: no cover - internal layout changed
+        pytest.skip(f"SDK transport moved ({exc}) — re-check by hand how setting_sources reaches the CLI")
+    from bridge.claude_provider import STRICT_MCP_FLAG
+
+    opts = build_options(SessionSpec(user="a", cwd=str(tmp_path)), Settings(workspace=str(tmp_path)),
+                         can_use_tool=None, cli_path="/usr/local/bin/claude", extra_flags=(STRICT_MCP_FLAG,))
+    try:
+        transport = SubprocessCLITransport(prompt="hi", options=opts)
+    except TypeError:  # older signature with an explicit cli_path
+        transport = SubprocessCLITransport(prompt="hi", options=opts, cli_path="/usr/local/bin/claude")
+    if not hasattr(transport, "_build_command"):  # pragma: no cover
+        pytest.skip("SDK transport has no _build_command — re-check by hand")
+    cmd = transport._build_command()
+    assert "--setting-sources" in cmd and cmd[cmd.index("--setting-sources") + 1] == ""
+    assert STRICT_MCP_FLAG in cmd
