@@ -26,6 +26,7 @@ All functions are blocking (git subprocesses) — call them via ``asyncio.to_thr
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -44,6 +45,9 @@ log = get_logger("Plugin:AI:Workspace")
 GIT_TIMEOUT_S = 120
 BUNDLE_PATH = ".lyndrix/cache/origin.bundle"      # git-ignored (see instructions.CACHE_DIR)
 DIRTY_CACHE_S = 30.0
+
+_REMOTE_SECTION_RE = re.compile(r'^\s*\[remote\s+"([^"]+)"\]\s*$')
+_REMOTE_URL_RE = re.compile(r"^\s*(url|pushurl)\s*=\s*(\S+)\s*$", re.IGNORECASE)
 
 # Runs ``git <args>`` inside the runner container, in /workspace, as the agent user.
 # Returns ``None`` when no runner is available on this instance.
@@ -89,6 +93,8 @@ class WorkspaceManager:
         self._pending_tip: Optional[str] = None
         self._delivered_tip: Optional[str] = None
         self._dirty_cache: Optional[tuple[float, Optional[int]]] = None
+        self.credentials_scrub_pending = False    # a token-bearing remote URL waits for the runner
+        self.credentials_removed = False          # one was found (plugin <= 0.3.0 clone) and removed
 
     # ------------------------------------------------------------------ core-side git (trusted dirs only)
 
@@ -160,6 +166,7 @@ class WorkspaceManager:
             "dirty_files": self._dirty_files() if exists else 0,
             "has_instructions": safe_fs.kind(self.repo, "CLAUDE.md") == "file",
             "update_pending": self.update_pending,
+            "remote_credentials_removed": self.credentials_removed,
             "last_sync": self.last_sync.isoformat() if self.last_sync else None,
             "last_error": self.last_error,
         }
@@ -181,6 +188,7 @@ class WorkspaceManager:
                 self._populate(self._stage_local(branch))
             summary = write_instructions(self.repo, collect_plugin_index(), extra_instructions)
             self.ensure_agent_access()
+            self.scrub_remote_credentials()
             self.last_sync = datetime.now(timezone.utc)
             self._dirty_cache = None
             return {"ok": True, **summary, **self.status()}
@@ -268,6 +276,63 @@ class WorkspaceManager:
             except OSError:
                 pass
         self.ensure_agent_access()
+
+    def _credential_remotes(self) -> list[tuple[str, str, str]]:
+        """``(remote, key, url)`` of every remote URL in ``.git/config`` that carries
+        credentials. Read as a file (link-free), git is not asked."""
+        text = safe_fs.read_text(self.repo, ".git/config", max_bytes=262_144) or ""
+        found: list[tuple[str, str, str]] = []
+        remote: Optional[str] = None
+        for line in text.splitlines():
+            section = _REMOTE_SECTION_RE.match(line)
+            if section:
+                remote = section.group(1)
+                continue
+            if line.lstrip().startswith("["):
+                remote = None
+                continue
+            m = _REMOTE_URL_RE.match(line)
+            if remote and m and _public_url(m.group(2)) != m.group(2):
+                found.append((remote, m.group(1).lower(), m.group(2)))
+        return found
+
+    def scrub_remote_credentials(self) -> bool:
+        """Remove credentials from remote URLs in the workspace's ``.git/config`` (AI-06
+        for repositories cloned by plugin <= 0.3.0, which stored ``https://TOKEN@…``;
+        on a root core the old code could never strip it). Runs ``git remote set-url``
+        inside the runner as the agent; without a runner it stays pending. ``True``
+        when something was changed."""
+        try:
+            found = self._credential_remotes()
+        except OSError:
+            return False
+        if not found:
+            self.credentials_scrub_pending = False
+            return False
+        if self.sandbox_git is None:
+            self.credentials_scrub_pending = True
+            return False
+        changed = False
+        for remote, key, url in found:
+            if remote.startswith("-"):
+                continue
+            args = ["remote", "set-url", *(["--push"] if key == "pushurl" else []), remote, _public_url(url) or ""]
+            try:
+                res = self.sandbox_git(*args, timeout=30)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Workspace: could not strip credentials from remote '{remote}' — {exc}")
+                continue
+            if res is None:
+                self.credentials_scrub_pending = True
+                return changed
+            if res.returncode == 0:
+                changed = True
+        if changed:
+            self.credentials_removed = True
+            log.warning("Workspace: a remote URL in .git/config carried credentials (clone by plugin <= 0.3.0) — "
+                        "removed. Every chat user could read it: rotate the workspace git token.")
+        self.credentials_scrub_pending = bool(self._credential_remotes())
+        return changed
 
     def apply_pending_update(self) -> bool:
         """Fast-forward the workspace to the delivered bundle — inside the runner, as

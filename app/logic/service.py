@@ -373,6 +373,8 @@ class AiAssistantService:
             if self.workspace is not None and self.workspace.update_pending:
                 # a remote update fetched while no runner was up: merge it in the sandbox now
                 await asyncio.to_thread(self.workspace.apply_pending_update)
+            if self.workspace is not None and self.workspace.credentials_scrub_pending:
+                await asyncio.to_thread(self.workspace.scrub_remote_credentials)
             return health
 
     async def _runner_watchdog(self, interval: float = 60.0) -> None:

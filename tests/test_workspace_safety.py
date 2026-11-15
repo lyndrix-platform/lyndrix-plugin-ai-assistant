@@ -189,3 +189,31 @@ def test_remote_url_is_stored_without_credentials():
     assert ws_mod._public_url("https://dummy-token-not-real@git.example/x.git") == "https://git.example/x.git"
     assert ws_mod._public_url("https://git.example/a@b.git") == "https://git.example/a@b.git"
     assert ws_mod._with_token("https://git.example/x.git", "dummy-token-not-real").startswith("https://dummy-token-not-real@")
+
+
+def test_a_token_left_in_git_config_by_an_old_clone_is_removed_in_the_sandbox(tmp_path):
+    """Review of AI-06: repos cloned by 0.3.0 keep https://TOKEN@… in the agent-readable
+    .git/config (on a root core the old `remote set-url` always failed)."""
+    storage = tmp_path / "storage"
+    wm = WorkspaceManager(storage)
+    assert wm.sync(repo_url=None, branch="main", token=None, extra_instructions=None)["ok"]
+    git(wm.repo, "remote", "add", "origin", "https://dummy-token-not-real@git.example/x.git")
+    git(wm.repo, "remote", "set-url", "--push", "origin", "https://u:dummy-token-not-real@git.example/x.git")
+
+    wm.scrub_remote_credentials()                                   # no runner yet: pending, unchanged
+    assert wm.credentials_scrub_pending and "dummy-token-not-real" in (wm.repo / ".git" / "config").read_text()
+
+    calls = []
+
+    def sandbox_git(*args, timeout=60):
+        calls.append(args)
+        return subprocess.run(["git", *args], cwd=str(wm.repo), env={**GIT_ENV, "HOME": str(tmp_path)},
+                              capture_output=True, text=True)
+
+    wm.sandbox_git = sandbox_git
+    assert wm.scrub_remote_credentials() is True
+    config = (wm.repo / ".git" / "config").read_text()
+    assert "dummy-token-not-real" not in config and "https://git.example/x.git" in config
+    assert not wm.credentials_scrub_pending and wm.status()["remote_credentials_removed"] is True
+    assert [c[:3] for c in calls] == [("remote", "set-url", "origin"), ("remote", "set-url", "--push")]
+    assert wm.scrub_remote_credentials() is False                   # nothing left to do
