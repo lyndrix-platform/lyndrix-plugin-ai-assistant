@@ -32,6 +32,14 @@ Browser ──(SSE/REST)── Core-Instanz mit Rolle `runner` ──(HTTP, X-Br
   Operator-Notizen (`extra_instructions`). Die Anleitung selbst liefert jedes Plugin live
   (`GET /api/plugins/<id>/ai/instructions`); der Assistent holt sie bei Bedarf und legt sie
   versioniert unter `.lyndrix/cache/` ab – es gibt keine kopierten Texte im Workspace.
+- **Vertrauensgrenze Workspace**: `repo/` ist für den Agenten schreibbar. Der Core folgt dort
+  keinem Symlink (Schreiben, Lesen, chown, Löschen über `safe_fs`) und führt kein `git` darin aus –
+  die Git-Konfiguration eines Repos kann Programme starten. Ein Remote wird in einen nur für den
+  Core sichtbaren Mirror (`ai_workspace/origin.git`) geholt; der erste Checkout entsteht in einem
+  Staging-Verzeichnis, spätere Updates kommen als Bundle (`.lyndrix/cache/origin.bundle`) und
+  werden **im Runner** als `agent` per `git pull --ff-only` übernommen (`docker exec`, Secrets
+  geleert). Ohne Runner bleibt das Update in `status.workspace.update_pending` stehen. Im Repo
+  steht nur die Remote-URL ohne Zugangsdaten.
 
 ## Anmeldung bei Claude
 

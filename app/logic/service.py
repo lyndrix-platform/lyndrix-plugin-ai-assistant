@@ -67,8 +67,9 @@ class AiAssistantService:
             self.storage_dir = Path(getattr(core_settings, "STORAGE_DIR", "/data/storage"))
         except Exception:
             pass
-        self.workspace = WorkspaceManager(self.storage_dir)
         self.runner = RunnerManager(socket_client, self.storage_dir)
+        # git commands that must run in the agent-writable repository run in the runner
+        self.workspace = WorkspaceManager(self.storage_dir, sandbox_git=self.runner.sandbox_git)
 
     @property
     def is_ready(self) -> bool:
@@ -307,6 +308,9 @@ class AiAssistantService:
             cfg = await self.runner_config()
             health = await self.runner.ensure(cfg, force=force)
             self._health_cache = None
+            if self.workspace is not None and self.workspace.update_pending:
+                # a remote update fetched while no runner was up: merge it in the sandbox now
+                await asyncio.to_thread(self.workspace.apply_pending_update)
             return health
 
     async def _runner_watchdog(self, interval: float = 60.0) -> None:

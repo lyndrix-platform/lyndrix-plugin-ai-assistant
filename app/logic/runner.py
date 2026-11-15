@@ -32,6 +32,9 @@ BRIDGE_PORT = 8765
 AGENT_UID = 10000                           # user `agent` in the runner image (Dockerfile ARG AGENT_UID/GID)
 AGENT_GID = 10000
 _CGROUP_ID_RE = re.compile(r"containers/([0-9a-f]{64})")
+# Container env entries that must not reach a process we start in the runner on the
+# agent's behalf (``docker exec`` inherits the container env): they are blanked there.
+SECRET_ENV_KEYS = ("LYNDRIX_AI_BRIDGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "LYNDRIX_API_KEY")
 
 
 def _own_container_id() -> Optional[str]:
@@ -149,6 +152,26 @@ class RunnerManager:
             if line.startswith("LYNDRIX_AI_FINGERPRINT="):
                 return line.split("=", 1)[1].strip() or None
         return None
+
+    @staticmethod
+    def sandbox_git(*args: str, timeout: int = 60) -> Optional[subprocess.CompletedProcess]:
+        """Run ``git <args>`` in ``/workspace`` INSIDE the runner container as the agent
+        user. Blocking. ``None`` when no running runner is reachable from this instance.
+
+        The workspace repository is agent-writable, so its git config may run arbitrary
+        programs; inside the sandbox, as the agent, with the container secrets blanked,
+        that gains the agent nothing it does not already have (AI-05). The core itself
+        never runs git on that repository."""
+        try:
+            if RunnerManager.container_state() != "running":
+                return None
+            cmd = ["exec", "-u", f"{AGENT_UID}:{AGENT_GID}", "-w", "/workspace", "-e", "HOME=/home/agent"]
+            for key in SECRET_ENV_KEYS:
+                cmd += ["-e", f"{key}="]
+            return _docker(*cmd, CONTAINER_NAME, "git", *args, timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as exc:   # no docker CLI here, or a timeout
+            log.debug(f"Runner: sandbox git unavailable — {exc}")
+            return None
 
     def bridge_url(self) -> str:
         return f"http://{CONTAINER_NAME}:{BRIDGE_PORT}"
