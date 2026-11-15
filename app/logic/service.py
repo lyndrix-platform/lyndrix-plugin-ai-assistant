@@ -42,7 +42,14 @@ PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "bypassPermissions
 # needs the permission auto_mode, "bypassPermissions" (no guardrails at all) plugin
 # admin — the router computes the caller's set, the service enforces it (AI-02).
 SAFE_MODES = ("default", "acceptEdits", "plan")
-DEFAULT_IMAGE = "ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest"
+# The runner image this plugin release is tested with: runner/VERSION, which the image
+# CI publishes as :<VERSION> (tests keep both equal). Pinned instead of :latest — every
+# recreate used to pull whatever was pushed last, with all secrets in its env (AI-08).
+RUNNER_VERSION = "0.1.6"
+IMAGE_REPO = "ghcr.io/lyndrix-platform/lyndrix-ai-runner"
+DEFAULT_IMAGE = f"{IMAGE_REPO}:{RUNNER_VERSION}"
+# The old manifest default; a stored copy of it means "the default", not "follow latest".
+LEGACY_DEFAULT_IMAGE = f"{IMAGE_REPO}:latest"
 TRANSCRIPT_MAX_CHARS = 6000
 
 
@@ -188,13 +195,29 @@ class AiAssistantService:
         auth_env = dict(self.auth_env())
         auth_env.update(await self._agent_access_env())
         return RunnerConfig(
-            image=str(self.setting("runner_image", DEFAULT_IMAGE)),
+            image=self.runner_image(),
             auth_env=auth_env,
             bridge_token=await self._bridge_token(),
             model=self.setting("model"),
             host_workspace=f"{host_storage.rstrip('/')}/ai_workspace/repo",
             network=await asyncio.to_thread(RunnerManager.own_network),
         )
+
+    def runner_image(self) -> str:
+        image = str(self.setting("runner_image", DEFAULT_IMAGE)).strip()
+        return DEFAULT_IMAGE if image in ("", LEGACY_DEFAULT_IMAGE) else image
+
+    def runner_limits(self) -> dict[str, str]:
+        """Resource caps for the runner container (``docker update``): a runaway or
+        injected agent must not starve the runner host, which also runs the
+        orchestrator's jobs (AI-08). Empty or 0 = no cap for that resource."""
+        limits: dict[str, str] = {}
+        for key, flag, default in (("runner_memory", "memory", "4g"), ("runner_cpus", "cpus", "2"),
+                                   ("runner_pids_limit", "pids", "1024")):
+            value = str(self.setting(key, default)).strip().lower()
+            if value and value not in ("0", "none", "off"):
+                limits[flag] = value
+        return limits
 
     async def _agent_access_env(self) -> dict[str, str]:
         """``LYNDRIX_API_URL`` / ``LYNDRIX_API_KEY`` for the agent's own Lyndrix
@@ -324,6 +347,7 @@ class AiAssistantService:
             return {"status": "not_bound"}
         async with self._runner_lock:
             cfg = await self.runner_config()
+            cfg.limits = self.runner_limits()
             health = await self.runner.ensure(cfg, force=force)
             self._health_cache = None
             await self._reattach_recorders()

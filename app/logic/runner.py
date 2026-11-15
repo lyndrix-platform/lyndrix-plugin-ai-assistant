@@ -63,6 +63,8 @@ class RunnerConfig:
         self.model = model
         self.host_workspace = host_workspace
         self.network = network
+        # memory / cpus / pids, applied with `docker update` (no recreate; not in the fingerprint)
+        self.limits: dict[str, str] = {}
 
     def describe(self) -> str:
         """Secret-free summary for the log (what the fingerprint is made of)."""
@@ -189,6 +191,20 @@ class RunnerManager:
         try:
             if force or changed or state is None:
                 if state is not None:
+                    # Fetch the image BEFORE removing the working container: the core spawns
+                    # with `--pull always`, so a registry outage or a bad tag used to leave no
+                    # runner at all until the registry was back (AI-08).
+                    pulled = await asyncio.to_thread(_docker, "pull", "-q", cfg.image, timeout=600)
+                    if pulled.returncode != 0:
+                        detail = (pulled.stderr or pulled.stdout or "").strip()[:200]
+                        self.last_error = (f"image {cfg.image} not available ({detail}) — "
+                                           f"the runner keeps its previous configuration")
+                        log.error(f"Runner: {self.last_error}")
+                        if state == "running":
+                            await self._apply_limits(cfg)
+                            health = await self.wait_healthy()
+                            return {**health, "status": "degraded", "error": self.last_error}
+                        return {"status": "error", "error": self.last_error}
                     log.info(f"Runner: recreating {CONTAINER_NAME} ({'forced' if force else 'configuration changed'}) — {cfg.describe()}")
                     await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME)
                 await self._spawn(cfg)
@@ -199,6 +215,7 @@ class RunnerManager:
                     await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME)
                     await self._spawn(cfg)
             self._fingerprint = cfg.fingerprint()
+            await self._apply_limits(cfg)
             return await self.wait_healthy()
         except Exception as exc:  # noqa: BLE001 — health shows it, setup never dies
             self.last_error = str(exc)[:500]
@@ -231,6 +248,26 @@ class RunnerManager:
         if not isinstance(result, dict) or result.get("status") not in ("running", "ok", "started"):
             raise RuntimeError(f"spawn failed: {(result or {}).get('error') if isinstance(result, dict) else result}")
         log.info(f"Runner: spawned {CONTAINER_NAME} from {cfg.image} on network {cfg.network or 'default'}")
+
+    async def _apply_limits(self, cfg: RunnerConfig) -> None:
+        """Memory/CPU/PID caps via `docker update` — the core's docker:spawn has no such
+        options (core follow-up: limits, cap-drop, no-new-privileges, read-only rootfs)."""
+        args: list[str] = []
+        if cfg.limits.get("memory"):
+            args += ["--memory", cfg.limits["memory"], "--memory-swap", cfg.limits["memory"]]
+        if cfg.limits.get("cpus"):
+            args += ["--cpus", cfg.limits["cpus"]]
+        if cfg.limits.get("pids"):
+            args += ["--pids-limit", cfg.limits["pids"]]
+        if not args:
+            return
+        try:
+            res = await asyncio.to_thread(_docker, "update", *args, CONTAINER_NAME, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(f"Runner: resource limits not applied — {exc}")
+            return
+        if res.returncode != 0:
+            log.warning(f"Runner: resource limits not applied — {(res.stderr or '').strip()[:200]}")
 
     async def wait_healthy(self, attempts: int = 20, pause: float = 1.5) -> dict:
         last: dict = {"status": "starting"}

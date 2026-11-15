@@ -6,7 +6,6 @@ from contextlib import contextmanager
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
 from ai_plugin.app.logic import service as service_mod
 from ai_plugin.app.logic.access import parse_vault_spaces
@@ -74,8 +73,11 @@ class _FakeBridge:
 
 
 @pytest.fixture
-def db(monkeypatch):
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+def db(monkeypatch, tmp_path):
+    # A file database with a connection per thread, like MariaDB's pool: with an in-memory
+    # StaticPool every worker thread (asyncio.to_thread) shared ONE connection and two
+    # concurrent writers failed with "cannot start a transaction within a transaction".
+    engine = create_engine(f"sqlite:///{tmp_path / 'ai.db'}", connect_args={"check_same_thread": False, "timeout": 30})
     _Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     dbi = db_mod.db_instance
@@ -492,3 +494,71 @@ def test_runner_remove_runs_docker_rm_only_when_there_is_a_container(monkeypatch
     assert calls == [("rm", "-f", runner_mod.CONTAINER_NAME)] and mgr.client is None
     state["value"] = None
     assert asyncio.run(mgr.remove()) is False and len(calls) == 1
+
+
+def test_runner_image_is_pinned_and_the_old_latest_default_maps_to_it():
+    """AI-08: every recreate pulled the mutable :latest, with all secrets in the env."""
+    from pathlib import Path
+
+    version = (Path(__file__).resolve().parents[1] / "runner" / "VERSION").read_text().strip()
+    assert service_mod.RUNNER_VERSION == version                    # bump both together
+    svc = AiAssistantService()
+    for stored, expected in ((None, f"{service_mod.IMAGE_REPO}:{version}"),
+                             ("", f"{service_mod.IMAGE_REPO}:{version}"),
+                             ("ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest", f"{service_mod.IMAGE_REPO}:{version}"),
+                             ("registry.example/runner@sha256:abc", "registry.example/runner@sha256:abc")):
+        svc.settings = {} if stored is None else {"runner_image": stored}
+        assert svc.runner_image() == expected
+    svc.settings = {}
+    assert svc.runner_limits() == {"memory": "4g", "cpus": "2", "pids": "1024"}
+    svc.settings = {"runner_memory": "0", "runner_cpus": "", "runner_pids_limit": "256"}
+    assert svc.runner_limits() == {"cpus": "2", "pids": "256"}
+
+
+def _runner_with_fake_docker(monkeypatch, *, state, pull_ok=True):
+    import subprocess
+
+    from ai_plugin.app.logic import runner as runner_mod
+
+    calls = []
+
+    def docker(*args, timeout=30):
+        calls.append(args)
+        rc = 1 if (args[0] == "pull" and not pull_ok) else 0
+        return subprocess.CompletedProcess(args, rc, "", "registry unreachable" if rc else "")
+
+    class _Socket:
+        async def spawn_runner(self, **kw):
+            calls.append(("spawn", kw["image"]))
+            return {"status": "running"}
+
+    monkeypatch.setattr(runner_mod, "_docker", docker)
+    monkeypatch.setattr(runner_mod.RunnerManager, "container_state", staticmethod(lambda: state))
+    monkeypatch.setattr(runner_mod.RunnerManager, "container_fingerprint", staticmethod(lambda: "old-fingerprint"))
+    mgr = runner_mod.RunnerManager(_Socket(), "/tmp")
+
+    async def healthy(*a, **kw):
+        return {"status": "ok"}
+
+    mgr.wait_healthy = healthy  # type: ignore[method-assign]
+    cfg = runner_mod.RunnerConfig(image="ghcr.io/x/runner:0.2.0", auth_env={}, bridge_token="dummy-not-real",
+                                  model=None, host_workspace="/srv/ws", network="net")
+    cfg.limits = {"memory": "4g", "cpus": "2", "pids": "1024"}
+    return mgr, cfg, calls
+
+
+def test_recreate_pulls_first_and_keeps_the_running_runner_when_the_pull_fails(monkeypatch):
+    mgr, cfg, calls = _runner_with_fake_docker(monkeypatch, state="running", pull_ok=False)
+    health = asyncio.run(mgr.ensure(cfg))
+    assert [c[0] for c in calls] == ["pull", "update"]               # no rm, no spawn
+    assert health["status"] == "degraded" and "keeps its previous configuration" in health["error"]
+
+    mgr, cfg, calls = _runner_with_fake_docker(monkeypatch, state="running", pull_ok=True)
+    assert asyncio.run(mgr.ensure(cfg))["status"] == "ok"
+    assert [c[0] for c in calls] == ["pull", "rm", "spawn", "update"]
+    assert calls[-1] == ("update", "--memory", "4g", "--memory-swap", "4g", "--cpus", "2", "--pids-limit", "1024",
+                         "lyndrix-ai-runner")
+
+    mgr, cfg, calls = _runner_with_fake_docker(monkeypatch, state=None)  # first start: spawn pulls itself
+    asyncio.run(mgr.ensure(cfg))
+    assert [c[0] for c in calls] == ["spawn", "update"]

@@ -18,6 +18,13 @@ Browser ──(SSE/REST)── Core-Instanz mit Rolle `runner` ──(HTTP, X-Br
   erzeugt/aktualisiert den Container; alle beantworten die API gegen denselben Container.
 - **Runner-Container** `lyndrix-ai-runner` (Image `ghcr.io/lyndrix-platform/lyndrix-ai-runner`):
   langlebig, wird neu erzeugt, wenn Image, Zugangsdaten, Modell oder Workspace-Pfad wechseln.
+  Standard-Image ist die mit dem Plugin getestete Runner-Version (`:<runner/VERSION>`), nicht
+  `:latest`; ein gespeichertes `:latest` des offiziellen Images gilt als Standard. Vor dem
+  Neuanlegen wird das Image gezogen: Scheitert das (Registry weg, falscher Tag), läuft der alte
+  Container weiter. Speicher, CPU und Prozesse begrenzt `docker update` (Settings `runner_memory`
+  4g, `runner_cpus` 2, `runner_pids_limit` 1024; 0 = aus). Härtung beim Start (`--cap-drop`,
+  `no-new-privileges`, read-only, eigenes Netz, `--pull missing`) braucht `docker:spawn`-Optionen
+  im Core und ist noch offen.
   Er hängt am Docker-Netzwerk der Core-Instanz und ist nur dort erreichbar. Er läuft als Benutzer
   `agent` (uid/gid 10000); der Core übergibt den Workspace-Baum nach jedem Sync an diesen Benutzer.
   Das benannte Volume `lyndrix-ai-runner-home` hält `/home/agent/.claude` (Claude-Konfiguration und
