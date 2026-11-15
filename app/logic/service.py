@@ -478,7 +478,10 @@ class AiAssistantService:
 
         if self.is_ready:
             await asyncio.to_thread(retry_write, _insert)
-        return self.get_session(sid) or {"id": sid, "owner": owner, "title": payload["title"], "status": "idle"}
+        # sync SQLAlchemy/pymysql: never on the loop (a hung DB would stall the runner
+        # instance's lease renewals — the 2026-11-11 "No runner online" pattern, AI-09)
+        row = await asyncio.to_thread(self.get_session, sid)
+        return row or {"id": sid, "owner": owner, "title": payload["title"], "status": "idle"}
 
     async def send_message(self, session_id: str, owner: str, content: str, *,
                            allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
@@ -522,7 +525,7 @@ class AiAssistantService:
         except BridgeError as exc:
             if exc.status != 404:
                 raise
-            row = self.get_session(session_id) or {}
+            row = await asyncio.to_thread(self.get_session, session_id) or {}
             mode = row.get("permission_mode") or "default"
             if mode not in allowed or mode not in PERMISSION_MODES:
                 await self._downgrade_mode(session_id, mode, live=False)

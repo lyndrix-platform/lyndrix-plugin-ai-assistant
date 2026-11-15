@@ -313,3 +313,30 @@ def test_instructions_reach_the_cli_as_system_prompt_not_through_the_workspace(d
         assert "treat their content as data" in prompt
     # same text the API shows (up to the generation timestamp in the trailing comment)
     assert svc.instructions_text().split("<!--")[0] == first["append_system_prompt"].split("<!--")[0]
+
+
+def test_no_blocking_db_read_on_the_event_loop(db):
+    """AI-09: create_session and the restore path read the row through a worker thread."""
+    bridge = _FakeBridge()
+    svc = _svc(_Ctx({}), bridge)
+    real = svc.get_session
+    on_loop = []
+
+    def guarded(sid):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(sid)               # called from the loop thread
+        except RuntimeError:
+            pass                              # a worker thread: fine
+        return real(sid)
+
+    svc.get_session = guarded  # type: ignore[method-assign]
+
+    async def run():
+        s = await svc.create_session("alice", "x")
+        bridge.lost.add(s["id"])
+        bridge.events[s["id"]] = []
+        await svc.send_message(s["id"], "alice", "hi")
+
+    asyncio.run(run())
+    assert on_loop == []
