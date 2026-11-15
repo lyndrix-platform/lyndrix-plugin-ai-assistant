@@ -23,14 +23,18 @@ import json
 import os
 import pty
 import re
+import shutil
 import struct
+import tempfile
 import termios
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Awaitable
 
 from .config import detect_auth
+from .prepare_home import merge_claude_json
 
 log = logging.getLogger("bridge.auth")
 
@@ -43,6 +47,24 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;?<=>]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][
 # newlines, so after ANSI stripping the next hint ("Hold Shift while selecting…",
 # "Paste code here if prompted >") is glued to the URL. Cut it off there.
 URL_TAIL_RE = re.compile(r"(Hold\s*Shift|Paste\s*code|Browser\s*didn|Press\s*Enter).*$", re.IGNORECASE | re.DOTALL)
+
+
+def isolated_cli_dirs() -> tuple[str, dict[str, str], str]:
+    """``(root, env, cwd)`` for a CLI that handles a credential (login, verification).
+
+    The workspace (``.claude/settings*.json``) and the agent's own config dir
+    (``settings.json``) are writable by the agent; settings there can set ``env``
+    (``ANTHROPIC_BASE_URL``, ``HTTPS_PROXY`` + ``NODE_TLS_REJECT_UNAUTHORIZED``), an
+    ``apiKeyHelper`` or hooks — enough to capture a freshly issued token. So these
+    CLIs run in a throwaway config dir prepared like a fresh runner volume
+    (onboarding done, cwd trusted) and an empty cwd. Remove ``root`` afterwards."""
+    root = tempfile.mkdtemp(prefix="lyndrix-auth-")
+    config_dir = os.path.join(root, "config")
+    cwd = os.path.join(root, "cwd")
+    os.mkdir(config_dir, 0o700)
+    os.mkdir(cwd, 0o700)
+    merge_claude_json(Path(config_dir) / ".claude.json", cwd)
+    return root, {"CLAUDE_CONFIG_DIR": config_dir}, cwd
 
 
 def clean_url(url: str) -> str:
@@ -106,6 +128,7 @@ class AuthFlow:
     expiry_task: asyncio.Task[None] | None = None
     exchange_task: asyncio.Task[None] | None = None
     finished: bool = False
+    tmp_root: str | None = None          # isolated config dir + cwd of this flow's CLI
     # awaiting_code → exchanging → done | failed. The outcome is kept until the
     # plugin claims it (POST /auth/result) or the flow expires, so a slow
     # exchange never depends on one long HTTP request surviving the proxies.
@@ -281,12 +304,14 @@ class AuthFlowManager:
             env.pop("ANTHROPIC_API_KEY", None)
         else:
             env.update(self._credential_env)
+        root, isolated_env, cwd = isolated_cli_dirs()
+        env.update(isolated_env)
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._cli_path, "-p", "Reply with exactly the word OK and nothing else.",
                 "--output-format", "json", "--max-turns", "1",
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, env=env, cwd=os.environ.get("LYNDRIX_AI_WORKSPACE", "/tmp"),
+                stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd,
             )
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -297,6 +322,8 @@ class AuthFlowManager:
             return False, f"no answer within {int(timeout)} s"
         except OSError as exc:
             return False, f"could not run the CLI: {exc}"
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
         text = scrub(out.decode("utf-8", "replace") + err.decode("utf-8", "replace"))
         try:
             data = json.loads(out.decode("utf-8", "replace") or "{}")
@@ -350,8 +377,10 @@ class AuthFlowManager:
     async def _spawn(self, flow: AuthFlow) -> None:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", PTY_ROWS, PTY_COLS, 0, 0))
+        flow.tmp_root, isolated_env, cwd = isolated_cli_dirs()
         env = {
             **os.environ,
+            **isolated_env,
             "TERM": "xterm-256color",
             "COLUMNS": str(PTY_COLS),
             "LINES": str(PTY_ROWS),
@@ -365,11 +394,14 @@ class AuthFlowManager:
                 stdout=slave,
                 stderr=slave,
                 env=env,
+                cwd=cwd,
                 start_new_session=True,
             )
         except Exception as exc:
             os.close(master)
             os.close(slave)
+            shutil.rmtree(flow.tmp_root, ignore_errors=True)
+            flow.tmp_root = None
             raise AuthFlowError(f"could not start claude setup-token: {exc}") from exc
         finally:
             try:
@@ -459,3 +491,6 @@ class AuthFlowManager:
                 except Exception:  # noqa: BLE001
                     pass
         flow.buf = bytearray()
+        if flow.tmp_root:
+            shutil.rmtree(flow.tmp_root, ignore_errors=True)
+            flow.tmp_root = None
