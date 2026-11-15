@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from core.api import get_logger
 
@@ -29,6 +30,7 @@ from .access import (
 )
 from .bridge import BridgeClient, BridgeError
 from .instructions import collect_plugin_index, render_instructions
+from .redact import redact, redact_obj
 from .runner import RunnerConfig, RunnerManager
 from .workspace import WorkspaceManager
 
@@ -53,6 +55,8 @@ DEFAULT_IMAGE = f"{IMAGE_REPO}:{RUNNER_VERSION}"
 # The old manifest default; a stored copy of it means "the default", not "follow latest".
 LEGACY_DEFAULT_IMAGE = f"{IMAGE_REPO}:latest"
 TRANSCRIPT_MAX_CHARS = 6000
+PRUNE_INTERVAL_S = 6 * 3600          # retention sweep cadence on the runner host
+PURGE_BATCH = 500                    # rows per DELETE (stays far below the DB statement cap)
 
 
 def _utcnow() -> datetime:
@@ -76,6 +80,7 @@ class AiAssistantService:
         self._seqs: dict[str, int] = {}          # last bridge event seq seen per session
         self._health_cache: tuple[float, dict] | None = None
         self.is_runner_host = False      # set by the lease: this instance drives the container
+        self._last_prune = 0.0
 
     # ------------------------------------------------------------------ wiring
 
@@ -383,6 +388,7 @@ class AiAssistantService:
                     await self.ensure_runner()
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"Runner watchdog: {exc}")
+            await self.maybe_prune()
 
     async def start_runner_role(self) -> None:
         """``on_lease`` acquired: this instance drives the container."""
@@ -572,8 +578,9 @@ class AiAssistantService:
                     row.status = "running"
                     row.last_activity = now
                     if row.turns == 0 and row.title == "Neue Unterhaltung":
-                        row.title = content[:60] + ("…" if len(content) > 60 else "")
-                s.add(AiMessage(session_id=session_id, role="user", kind="text", content=content, created_at=now))
+                        title = redact(content)
+                        row.title = title[:60] + ("…" if len(title) > 60 else "")
+                s.add(AiMessage(session_id=session_id, role="user", kind="text", content=redact(content), created_at=now))
                 s.commit()
 
         if self.is_ready:
@@ -688,6 +695,82 @@ class AiAssistantService:
 
         if self.is_ready:
             await asyncio.to_thread(retry_write, _archive)
+
+    # ------------------------------------------------------------------ retention (AI-12)
+
+    def _delete_sessions(self, session_ids: list[str]) -> int:
+        """Delete the transcript entries (in short committed batches) and then the rows of
+        ``session_ids``. Blocking. Returns the number of transcript entries removed."""
+        removed = 0
+        for sid in session_ids:
+            while True:
+                def _batch() -> int:
+                    with get_session() as s:
+                        ids = s.scalars(select(AiMessage.id).where(AiMessage.session_id == sid).limit(PURGE_BATCH)).all()
+                        if ids:
+                            s.execute(delete(AiMessage).where(AiMessage.id.in_(ids)))
+                            s.commit()
+                        return len(ids)
+
+                n = retry_write(_batch)
+                removed += n
+                if n < PURGE_BATCH:
+                    break
+
+            def _row():
+                with get_session() as s:
+                    s.execute(delete(AiSession).where(AiSession.id == sid))
+                    s.commit()
+
+            retry_write(_row)
+        return removed
+
+    async def purge_session(self, session_id: str) -> dict:
+        """Hard delete of one conversation (owner or admin): the bridge session, every
+        transcript entry and the row. ``DELETE`` without purge only archives."""
+        try:
+            await self.bridge().close_session(session_id)
+        except BridgeError as exc:
+            if exc.status not in (404, 503, 504):
+                raise
+        self._recorders.pop(session_id, None)
+        self._seqs.pop(session_id, None)
+        removed = await asyncio.to_thread(self._delete_sessions, [session_id]) if self.is_ready else 0
+        log.info(f"Session {session_id[:8]} purged ({removed} transcript entries).")
+        return {"ok": True, "purged": session_id, "messages": removed}
+
+    def retention_days(self) -> int:
+        try:
+            return max(0, int(str(self.setting("transcript_retention_days", 0)).strip() or 0))
+        except ValueError:
+            return 0
+
+    def prune_transcripts(self, days: Optional[int] = None) -> dict:
+        """Delete conversations inactive for more than ``days`` (setting
+        ``transcript_retention_days``; 0 = keep). Running turns are kept. Blocking."""
+        days = self.retention_days() if days is None else days
+        if days <= 0 or not self.is_ready:
+            return {"ok": True, "sessions": 0, "messages": 0, "retention_days": days}
+        cutoff = _utcnow() - timedelta(days=days)
+        with get_session() as s:
+            ids = [str(x) for x in s.scalars(
+                select(AiSession.id).where(AiSession.last_activity < cutoff,
+                                           AiSession.status.notin_(("running", "waiting_approval")))
+            ).all()]
+        removed = self._delete_sessions(ids)
+        if ids:
+            log.info(f"Retention: removed {len(ids)} conversation(s), {removed} transcript entries older than {days} days.")
+        return {"ok": True, "sessions": len(ids), "messages": removed, "retention_days": days}
+
+    async def maybe_prune(self) -> None:
+        """Retention sweep from the runner host's watchdog, at most every few hours."""
+        if self.retention_days() <= 0 or time.monotonic() - self._last_prune < PRUNE_INTERVAL_S:
+            return
+        self._last_prune = time.monotonic()
+        try:
+            await asyncio.to_thread(self.prune_transcripts)
+        except Exception as exc:  # noqa: BLE001 — retried on the next sweep
+            log.warning(f"Retention sweep failed — {exc}")
 
     # ------------------------------------------------------------------ recorder
 
@@ -807,7 +890,10 @@ class AiAssistantService:
         if not self.is_ready:
             return
         now = _utcnow()
-        meta_json = json.loads(json.dumps(meta, default=str)) if meta else None
+        # Token-shaped strings never reach the table (AI-12): tool output of `env`,
+        # `cat .env`, a pasted key … would otherwise stay readable for every admin.
+        meta_json = redact_obj(json.loads(json.dumps(meta, default=str))) if meta else None
+        content = redact(content)
 
         def _tx():
             with get_session() as s:
@@ -856,7 +942,7 @@ class AiAssistantService:
                     meta = {k: result.get(k) for k in ("subtype", "duration_ms", "total_cost_usd", "num_turns",
                                                        "is_error", "terminal_reason", "stop_reason")}
                     if result.get("result"):            # the CLI's final text (error description on is_error)
-                        meta["result"] = str(result["result"])[:2000]
+                        meta["result"] = redact(str(result["result"])[:2000])
                     s.add(AiMessage(session_id=session_id, role="system", kind="result", content=None,
                                     meta=meta, created_at=now))
                 s.commit()

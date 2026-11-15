@@ -124,6 +124,16 @@ das Claude-Credential und die Werte der Vault-Spaces lesen. Daraus folgt:
   mit begrenzten gescopten Keys (≥ 1.12.0) und Prozess-Isolation je Nutzer im Runner. Das ist noch
   offen.
 
+## Verläufe
+
+Sessions und Verlauf liegen in `ai_sessions`/`ai_messages`. Vor dem Speichern werden
+Zeichenketten in bekannten Token-Formaten durch `[redacted]` ersetzt: Claude-/Anthropic-Keys,
+Lyndrix-Keys, GitLab-/GitHub-/Vault-Tokens, `Bearer`-/`Basic`-Werte und private Schlüssel. Das
+betrifft Nutzernachrichten, Werkzeug-Ein- und -Ausgaben und Ergebnisse. Allgemeine
+„password=…“-Heuristiken gibt es bewusst nicht. `transcript_retention_days` löscht inaktive
+Unterhaltungen nach N Tagen (alle 6 h auf dem Runner-Host; 0 = behalten, Standard). Laufende
+Runden bleiben. Mit `?purge=true` löscht der Eigentümer oder ein Admin eine Unterhaltung sofort.
+
 ## API
 
 | Methode | Pfad | Recht | Zweck |
@@ -140,7 +150,8 @@ das Claude-Credential und die Werte der Vault-Spaces lesen. Daraus folgt:
 | GET | `/sessions/{id}/events?after=` | api:read | SSE-Strom der laufenden Runde |
 | POST | `/sessions/{id}/approvals/{aid}` | chat | allow / deny / allow_always |
 | POST | `/sessions/{id}/permission-mode`, `/sessions/{id}/interrupt` | chat | Modus wechseln, abbrechen |
-| DELETE | `/sessions/{id}` | api:write | schließen |
+| DELETE | `/sessions/{id}` | api:write | schließen (archivieren); `?purge=true` löscht Session und Verlauf endgültig |
+| POST | `/maintenance/prune` | api:admin | Aufbewahrungsfrist (`transcript_retention_days`) jetzt anwenden |
 | GET | `/vault/spaces`, `/vault/spaces/{space}` | api:read / agent_vault | erlaubte Spaces, Werte |
 
 Session-Routen gelten nur für eigene Sessions; Admins sehen alle. Admin-Routen und `chat`

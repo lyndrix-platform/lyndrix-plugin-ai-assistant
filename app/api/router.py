@@ -350,13 +350,28 @@ def build_router() -> APIRouter:
             raise _bridge_http(exc) from exc
 
     @router.delete("/sessions/{session_id}")
-    async def close_session(session_id: str, identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+    async def close_session(session_id: str, purge: bool = False,
+                            identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+        """Close and archive; ``?purge=true`` deletes the conversation and its transcript
+        for good (owner or admin, AI-12)."""
         await asyncio.to_thread(_owned, session_id, identity)
         try:
+            if purge:
+                return await ai_service.purge_session(session_id)
             await ai_service.close_session(session_id)
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
         return {"ok": True}
+
+    @router.post("/maintenance/prune")
+    async def prune(_identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
+        """Settings action: apply ``transcript_retention_days`` now."""
+        res = await asyncio.to_thread(ai_service.prune_transcripts)
+        if not res.get("retention_days"):
+            res["message"] = "Retention is off (transcript_retention_days = 0) — nothing deleted."
+        else:
+            res["message"] = f"{res['sessions']} conversation(s) older than {res['retention_days']} days deleted."
+        return res
 
     # ------------------------------------------------------------------ Vault spaces for the agent
 

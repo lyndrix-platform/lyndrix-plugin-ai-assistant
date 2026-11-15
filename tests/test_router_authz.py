@@ -291,3 +291,17 @@ def test_vault_spaces_with_a_slash_are_reachable(client, svc):
     res = call(client, "bot", "GET", "/vault/spaces/plugins/x")
     assert res.status_code == 200 and res.json()["space"] == "plugins/x"
     assert call(client, "bot", "GET", "/vault/spaces/plugins/../core").status_code == 404
+
+
+def test_purge_is_owner_or_admin_and_prune_is_admin(client, svc):
+    async def purge(sid):
+        svc.calls.append(("purge", sid))
+        return {"ok": True, "purged": sid}
+
+    svc.purge_session = purge
+    svc.prune_transcripts = lambda: {"ok": True, "sessions": 0, "messages": 0, "retention_days": 0}
+    assert call(client, "chatter", "DELETE", "/sessions/s-admin?purge=true").status_code == 404
+    assert call(client, "chatter", "DELETE", "/sessions/s-alice?purge=true").json()["purged"] == "s-alice"
+    assert call(client, "chatter", "POST", "/maintenance/prune").status_code == 403
+    assert call(client, "bot", "POST", "/maintenance/prune").status_code == 403
+    assert "Retention is off" in call(client, "admin", "POST", "/maintenance/prune").json()["message"]
