@@ -580,12 +580,13 @@ class AiAssistantService:
         def _record_user():
             with get_session() as s:
                 row = s.get(AiSession, session_id)
-                if row is not None:
-                    row.status = "running"
-                    row.last_activity = now
-                    if row.turns == 0 and row.title == "Neue Unterhaltung":
-                        title = redact(content)
-                        row.title = title[:60] + ("…" if len(title) > 60 else "")
+                if row is None:
+                    return                       # purged meanwhile: no orphan transcript rows
+                row.status = "running"
+                row.last_activity = now
+                if row.turns == 0 and row.title == "Neue Unterhaltung":
+                    title = redact(content)
+                    row.title = title[:60] + ("…" if len(title) > 60 else "")
                 s.add(AiMessage(session_id=session_id, role="user", kind="text", content=redact(content), created_at=now))
                 s.commit()
 
@@ -739,7 +740,13 @@ class AiAssistantService:
         except BridgeError as exc:
             if exc.status not in (404, 503, 504):
                 raise
-        self._recorders.pop(session_id, None)
+        # Stop the recorder BEFORE deleting: a running turn's recorder would otherwise
+        # write its next entries after the delete (found in review). Late writers are
+        # also refused by _store/_finish once the row is gone.
+        task = self._recorders.pop(session_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=10)
         self._seqs.pop(session_id, None)
         removed = await asyncio.to_thread(self._delete_sessions, [session_id]) if self.is_ready else 0
         log.info(f"Session {session_id[:8]} purged ({removed} transcript entries).")
@@ -764,9 +771,30 @@ class AiAssistantService:
                                            AiSession.status.notin_(("running", "waiting_approval")))
             ).all()]
         removed = self._delete_sessions(ids)
-        if ids:
-            log.info(f"Retention: removed {len(ids)} conversation(s), {removed} transcript entries older than {days} days.")
-        return {"ok": True, "sessions": len(ids), "messages": removed, "retention_days": days}
+        orphans = self._delete_orphan_messages()
+        if ids or orphans:
+            log.info(f"Retention: removed {len(ids)} conversation(s), {removed} transcript entries older than {days} days"
+                     f" and {orphans} orphaned entries.")
+        return {"ok": True, "sessions": len(ids), "messages": removed + orphans, "retention_days": days}
+
+    def _delete_orphan_messages(self) -> int:
+        """Transcript entries whose session row is gone (written by a recorder that
+        outlived a purge before this was fixed). Short committed batches. Blocking."""
+        removed = 0
+        while True:
+            def _batch() -> int:
+                with get_session() as s:
+                    ids = s.scalars(select(AiMessage.id).where(AiMessage.session_id.not_in(select(AiSession.id)))
+                                    .limit(PURGE_BATCH)).all()
+                    if ids:
+                        s.execute(delete(AiMessage).where(AiMessage.id.in_(ids)))
+                        s.commit()
+                    return len(ids)
+
+            n = retry_write(_batch)
+            removed += n
+            if n < PURGE_BATCH:
+                return removed
 
     async def maybe_prune(self) -> None:
         """Retention sweep from the runner host's watchdog, at most every few hours."""
@@ -904,10 +932,11 @@ class AiAssistantService:
 
         def _tx():
             with get_session() as s:
-                s.add(AiMessage(session_id=session_id, role=role, kind=kind, content=content, meta=meta_json, created_at=now))
                 row = s.get(AiSession, session_id)
-                if row is not None:
-                    row.last_activity = now
+                if row is None:
+                    return                       # purged meanwhile: no orphan transcript rows
+                s.add(AiMessage(session_id=session_id, role=role, kind=kind, content=content, meta=meta_json, created_at=now))
+                row.last_activity = now
                 s.commit()
 
         await asyncio.to_thread(retry_write, _tx)
@@ -937,14 +966,15 @@ class AiAssistantService:
         def _tx():
             with get_session() as s:
                 row = s.get(AiSession, session_id)
-                if row is not None:
-                    row.status = "idle"
-                    row.turns = (row.turns or 0) + 1
-                    row.last_activity = now
-                    if result:
-                        row.total_cost_usd = float(row.total_cost_usd or 0) + float(result.get("total_cost_usd") or 0)
-                        if result.get("claude_session_id"):
-                            row.claude_session_id = str(result["claude_session_id"])
+                if row is None:
+                    return                       # purged meanwhile: no orphan transcript rows
+                row.status = "idle"
+                row.turns = (row.turns or 0) + 1
+                row.last_activity = now
+                if result:
+                    row.total_cost_usd = float(row.total_cost_usd or 0) + float(result.get("total_cost_usd") or 0)
+                    if result.get("claude_session_id"):
+                        row.claude_session_id = str(result["claude_session_id"])
                 if result:
                     meta = {k: result.get(k) for k in ("subtype", "duration_ms", "total_cost_usd", "num_turns",
                                                        "is_error", "terminal_reason", "stop_reason")}

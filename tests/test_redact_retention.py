@@ -117,3 +117,52 @@ def test_retention_deletes_only_old_idle_conversations(db):
         assert s.get(AiSession, ids["old_running"]) is not None and s.get(AiSession, ids["recent"]) is not None
     svc.settings["transcript_retention_days"] = "0"
     assert svc.prune_transcripts()["sessions"] == 0                 # off by default
+
+
+def test_purge_during_a_running_turn_leaves_nothing_behind(db):
+    """Review of AI-12: the running turn's recorder kept writing after the delete."""
+    from .test_service import _SlowBridge
+
+    bridge = _SlowBridge()
+
+    async def close_session(sid):
+        pass
+
+    bridge.close_session = close_session
+    svc = _svc(_Ctx({}), bridge)
+
+    async def run():
+        s = await svc.create_session("alice", "x")
+        sid = s["id"]
+        bridge.events[sid] = [
+            {"seq": 1, "type": "status", "data": {"state": "running"}},
+            {"seq": 2, "type": "tool_use", "data": {"tool_use_id": "t1", "name": "Bash", "input": {"command": "sleep 60"}}},
+            {"seq": 3, "type": "assistant_text", "data": {"text": "still talking", "delta": True}},
+        ]
+        await svc.send_message(sid, "alice", "go")
+        for _ in range(100):
+            if svc._last_seq(sid) == 3:
+                break
+            await asyncio.sleep(0.01)
+        await svc.purge_session(sid)
+        await svc._store(sid, "assistant", "text", "a late writer", None)    # refused
+        await svc._finish(sid, ["late"], {"subtype": "success"})              # refused
+        return sid
+
+    sid = asyncio.run(run())
+    with db() as s:
+        assert s.get(AiSession, sid) is None
+        assert s.query(AiMessage).filter(AiMessage.session_id == sid).count() == 0
+
+
+def test_retention_also_sweeps_orphaned_entries(db):
+    from datetime import datetime
+
+    svc = _svc(_Ctx({"transcript_retention_days": "30"}), _FakeBridge())
+    with db() as s:
+        s.add(AiMessage(session_id="gone-session", role="tool", kind="tool_result", content="x",
+                        created_at=datetime(2026, 1, 1)))
+        s.commit()
+    assert svc.prune_transcripts()["messages"] == 1
+    with db() as s:
+        assert s.query(AiMessage).count() == 0
