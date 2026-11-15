@@ -87,10 +87,13 @@ ask → Modus.
   `bypassPermissions`). Sie treffen überall im Befehl, auch bei zusammengezogenen Leerzeichen.
 - Allow-Regeln gelten ab dem Anfang des Befehls bzw. Pfads und decken nie einen Bash-Befehl
   mit `; & | ` $( < >` oder Zeilenumbruch ab: `git status; curl …` fällt nicht mehr unter
-  `^git status`.
-- Eingebaut und immer aktiv: kein Umgebungs-Dump (`env`, `printenv`, `export -p`), kein
-  `/proc/*/environ`, keine Erwähnung der Claude-/Bridge-Credential-Variablen, keine Änderungen
-  unter `.git/`. Das sind Sicherheitsgurte gegen Prompt-Injection, keine Grenze gegen einen
+  `^git status`. Auch das Ende verankern (`$`), sonst laufen Argumente mit
+  (`git log --output=DATEI` schreibt Dateien). Dateipfade prüfen Deny/Ask zusätzlich in
+  Normalform (`..`, `.`, `//`); Allow gilt nur für bereits normale Pfade.
+- Eingebaut und immer aktiv: kein Umgebungs-Dump (`env`, `printenv`, `export`, `set`,
+  `declare -p`), kein `/proc/*/environ`, keine Erwähnung der Claude-/Bridge-Credential-Variablen,
+  keine Änderungen unter `.git/`, keine Git-Hooks, kein `core.hooksPath`/`core.fsmonitor`, kein
+  `git … --output`. Das sind Sicherheitsgurte gegen Prompt-Injection, keine Grenze gegen einen
   entschlossenen Nutzer.
 - Eine Freigabe „Immer erlauben“ im Chat gilt für die Session, und zwar nur für genau diesen
   Aufruf.

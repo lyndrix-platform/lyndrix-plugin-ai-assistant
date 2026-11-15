@@ -158,3 +158,30 @@ def test_enforced_is_deny_or_ask_only():
     assert policy.enforced("Edit", {"file_path": "/w/.env"}) == "ask"
     assert policy.enforced("Read", {"file_path": "/w/a"}) is None       # allow → the CLI's own flow
     assert policy.enforced("Bash", {"command": "ls"}) is None
+
+
+def test_paths_are_matched_in_normal_form():
+    """Review of AI-07: `..`, `.` and `//` walked past path rules."""
+    policy = Policy.from_dict({"allow": [{"tool": "Write", "match": r"^/workspace/docs/"}],
+                               "deny": [{"tool": "Write", "match": r"^/workspace/\.claude/"}]})
+    assert policy.evaluate("Write", {"file_path": "/workspace/docs/a.md"}) == "allow"
+    assert policy.evaluate("Write", {"file_path": "/workspace/docs/../.claude/settings.json"}) == "deny"
+    assert policy.evaluate("Write", {"file_path": "/workspace/./.claude/settings.json"}) == "deny"
+    assert policy.evaluate("Write", {"file_path": "/workspace/docs/../README.md"}) is None     # not normal → no allow
+    assert policy.evaluate("Write", {"file_path": "/workspace//docs/a.md"}) is None
+    assert Policy().evaluate("Read", {"file_path": "//proc/self/environ"}) == "deny"
+    assert Policy().evaluate("Read", {"file_path": "/proc/./self/environ"}) == "deny"
+
+
+@pytest.mark.parametrize("command", [
+    "printenv -0", "env -0", "true\nenv", "{ env; }", "FOO=1 env", "command env",
+    "git log --output=.git/hooks/pre-commit", "git config core.hooksPath /tmp/h",
+    "git -c core.fsmonitor='sh -c id' status", "cp x .git/hooks/post-checkout",
+])
+def test_more_builtin_denies_from_the_review(command):
+    assert Policy.from_dict({"allow": [{"tool": "*"}]}).evaluate("Bash", {"command": command}) == "deny"
+
+
+@pytest.mark.parametrize("command", ["set -e", "curl --output file https://x", "git log --oneline -3"])
+def test_and_what_must_stay_allowed(command):
+    assert Policy().evaluate("Bash", {"command": command}) is None

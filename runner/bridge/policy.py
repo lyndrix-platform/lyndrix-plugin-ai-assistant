@@ -29,6 +29,7 @@ writing git internals) — not a boundary a determined user cannot rewrite aroun
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -41,6 +42,17 @@ MUTATING_TOOLS = FILE_EDIT_TOOLS | frozenset({"Bash"})
 # Shell syntax that chains, substitutes or redirects.
 _SHELL_CONTROL_RE = re.compile(r"[;&|`<>\n\r]|\$\(")
 _WHITESPACE_RE = re.compile(r"\s+")
+# Tools whose rendering is one file path: matched also in normalised form.
+PATH_TOOLS = frozenset({"Read", "Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def normalise_path(path: str) -> str:
+    """Lexical normal form: no ``.``/``..`` segments, no repeated slashes (``posixpath``
+    keeps a leading ``//``; the kernel does not care, so neither do we)."""
+    if not path:
+        return path
+    norm = posixpath.normpath(path)
+    return "/" + norm.lstrip("/") if norm.startswith("//") else norm
 
 # Which input key carries the human-meaningful part of each tool call.
 _RENDER_KEYS: dict[str, tuple[str, ...]] = {
@@ -173,15 +185,29 @@ class Policy:
         }
 
     def evaluate(self, tool_name: str, tool_input: Any) -> Verdict | None:
-        """built-in deny → deny → allow → ask; ``None`` when nothing matched."""
+        """built-in deny → deny → allow → ask; ``None`` when nothing matched.
+
+        File paths: deny/ask rules also see the normalised path (``/w/./.claude``,
+        ``//proc/self/environ``, ``/w/docs/../.claude`` cannot slip past them), and an
+        allow rule only covers a path that is already in normal form — otherwise
+        ``^/w/docs/`` would allow ``/w/docs/../.claude/settings.json``."""
         rendered = render_input(tool_name, tool_input)
-        if any(rule.matches(tool_name, rendered) for rule in BUILTIN_DENY):
+        variants = [rendered]
+        normal = True
+        if tool_name in PATH_TOOLS:
+            norm = normalise_path(rendered)
+            if norm != rendered:
+                variants.append(norm)
+                normal = False
+
+        def hit(rules: list[PolicyRule] | tuple[PolicyRule, ...]) -> bool:
+            return any(rule.matches(tool_name, v) for rule in rules for v in variants)
+
+        if hit(BUILTIN_DENY) or hit(self.deny):
             return "deny"
-        if any(rule.matches(tool_name, rendered) for rule in self.deny):
-            return "deny"
-        if any(rule.allows(tool_name, rendered) for rule in self.allow):
+        if normal and any(rule.allows(tool_name, rendered) for rule in self.allow):
             return "allow"
-        if any(rule.matches(tool_name, rendered) for rule in self.ask):
+        if hit(self.ask):
             return "ask"
         return None
 
@@ -207,10 +233,16 @@ BUILTIN_DENY: tuple[PolicyRule, ...] = (
     PolicyRule(tool="Bash", match=r"\b(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|LYNDRIX_AI_BRIDGE_TOKEN)\b"),
     # another process's (or our own) start-up environment
     PolicyRule(tool="Bash", match=r"/proc/\S*environ"),
-    # dumping the whole environment: env/printenv/export/set/declare -p|-x used as a command
-    # without arguments ($(env), env | …, ; set) — `python -m venv env`, `printenv HOME`,
-    # `export FOO=1`, `set -e` stay allowed
-    PolicyRule(tool="Bash", match=r"(^|[;&|(`])\s*(env|printenv|export(\s+-p)?|set|declare\s+-[a-zA-Z]*[px])\s*($|[;&|)`>])"),
+    # dumping the whole environment: env/printenv (with options or VAR=x only), bare
+    # export/export -p/set/declare -p|-x, used as a command — at the start, after ; & | ( {
+    # ` or a line break, optionally behind VAR=x or command/exec/builtin. `python -m venv
+    # env`, `printenv HOME`, `env FOO=1 make`, `export FOO=1`, `set -e` stay allowed.
+    PolicyRule(tool="Bash", match=(
+        r"(^|[;&|(`{\n])\s*([A-Za-z_]\w*=\S*\s+)*((command|exec|builtin)\s+)?"
+        r"((env|printenv)(\s+(-\S*|[A-Za-z_]\w*=\S*))*|export(\s+-p)?|set|declare\s+-[a-zA-Z]*[px])"
+        r"\s*($|[;&|)`>}\n])")),
+    # planting code that every session's git runs: hooks, hooksPath/fsmonitor, git … --output
+    PolicyRule(tool="Bash", match=r"(?i)\.git/hooks|core\.(hookspath|fsmonitor)|\bgit\b[^;&|\n]*\s--output\b"),
     PolicyRule(tool="Read", match=r"^/proc/.*environ"),
     PolicyRule(tool="Grep", match=r"(^|\s)/proc/"),
     # git internals: hooks and config run as code in every session's git commands
