@@ -207,9 +207,10 @@ BUILTIN_DENY: tuple[PolicyRule, ...] = (
     PolicyRule(tool="Bash", match=r"\b(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|LYNDRIX_AI_BRIDGE_TOKEN)\b"),
     # another process's (or our own) start-up environment
     PolicyRule(tool="Bash", match=r"/proc/\S*environ"),
-    # dumping the whole environment: bare env/printenv, $(env), env | …, export -p, declare -x/-p
-    PolicyRule(tool="Bash", match=r"(^|[\s;&|(`])(printenv|env)\s*($|[;&|)`>])"),
-    PolicyRule(tool="Bash", match=r"\b(export\s+-p|declare\s+-[a-zA-Z]*[px])\b"),
+    # dumping the whole environment: env/printenv/export/set/declare -p|-x used as a command
+    # without arguments ($(env), env | …, ; set) — `python -m venv env`, `printenv HOME`,
+    # `export FOO=1`, `set -e` stay allowed
+    PolicyRule(tool="Bash", match=r"(^|[;&|(`])\s*(env|printenv|export(\s+-p)?|set|declare\s+-[a-zA-Z]*[px])\s*($|[;&|)`>])"),
     PolicyRule(tool="Read", match=r"^/proc/.*environ"),
     PolicyRule(tool="Grep", match=r"(^|\s)/proc/"),
     # git internals: hooks and config run as code in every session's git commands
