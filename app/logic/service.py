@@ -49,7 +49,7 @@ SAFE_MODES = ("default", "acceptEdits", "plan")
 # The runner image this plugin release is tested with: runner/VERSION, which the image
 # CI publishes as :<VERSION> (tests keep both equal). Pinned instead of :latest — every
 # recreate used to pull whatever was pushed last, with all secrets in its env (AI-08).
-RUNNER_VERSION = "0.1.6"
+RUNNER_VERSION = "0.2.0"
 IMAGE_REPO = "ghcr.io/lyndrix-platform/lyndrix-ai-runner"
 DEFAULT_IMAGE = f"{IMAGE_REPO}:{RUNNER_VERSION}"
 # The old manifest default; a stored copy of it means "the default", not "follow latest".
