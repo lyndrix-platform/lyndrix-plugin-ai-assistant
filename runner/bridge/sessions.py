@@ -24,7 +24,7 @@ from typing import Any
 
 from .claude_provider import Decision, Provider, ProviderSession, SessionSpec, TranslationState, translate, PERMISSION_MODES
 from .config import Settings
-from .events import EventLog, summarise_input, utc_now_iso
+from .events import TRUNCATION_MARK, EventLog, summarise_input, utc_now_iso
 from .policy import Policy, fallback_verdict, render_input
 
 log = logging.getLogger("bridge.sessions")
@@ -345,7 +345,11 @@ class SessionManager:
                 "tool_use_id": approval.tool_use_id,
                 "name": tool_name,
                 "input": approval.input,
+                # the full string the policy matched — the UI shows it, not the 2 KB summary (AI-11)
                 "rendered": render_input(tool_name, tool_input),
+                "input_truncated": any(
+                    isinstance(v, str) and v.endswith(TRUNCATION_MARK) for v in approval.input.values()
+                ),
                 "suggestions": context.get("suggestions") or [],
                 "title": context.get("title"),
                 "display_name": context.get("display_name"),

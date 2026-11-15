@@ -95,7 +95,8 @@
     "allow": "Erlauben",
     "deny": "Ablehnen",
     "allowAlways": "Immer erlauben",
-    "allowAlwaysHint": "Dieses Tool für den Rest der Sitzung ohne Rückfrage erlauben.",
+    "allowAlwaysHint": "Genau diesen Aufruf für den Rest der Sitzung ohne Rückfrage erlauben.",
+    "longInput": "Lange Anfrage – vor dem Erlauben ganz durchlesen. „Immer erlauben“ ist dafür gesperrt.",
     "resolvedLine": "Tool-Freigabe: {{decision}}",
     "autoLine": "Tool {{name}}: {{decision}} — automatisch durch Richtlinie"
   },

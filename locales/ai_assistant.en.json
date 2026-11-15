@@ -95,7 +95,8 @@
     "allow": "Allow",
     "deny": "Deny",
     "allowAlways": "Always allow",
-    "allowAlwaysHint": "Allow this tool for the rest of the session without asking again.",
+    "allowAlwaysHint": "Allow exactly this call for the rest of the session without asking again.",
+    "longInput": "Long request — scroll through all of it before you allow it. \"Always allow\" is off for it.",
     "resolvedLine": "Tool permission: {{decision}}",
     "autoLine": "Tool {{name}}: {{decision}} automatically by policy"
   },
