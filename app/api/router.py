@@ -7,6 +7,7 @@ calling user. All blocking work (DB, git, docker) is offloaded.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -96,6 +97,12 @@ def require_human(permission: str):
         return identity
 
     return dependency
+
+
+def _sse_error(message: str) -> bytes:
+    """An SSE error frame. Built with json.dumps: a quote or backslash in the message made
+    the f-string frame invalid JSON and the client silently dropped the error."""
+    return f"data: {json.dumps({'seq': 0, 'type': 'error', 'data': {'message': message}})}\n\n".encode()
 
 
 def _owned(session_id: str, identity: ApiIdentity) -> dict:
@@ -291,9 +298,9 @@ def build_router() -> APIRouter:
                         break
                     yield chunk
             except BridgeError as exc:
-                yield f'data: {{"seq": 0, "type": "error", "data": {{"message": "{exc.detail}"}}}}\n\n'.encode()
+                yield _sse_error(str(exc.detail))
             except Exception as exc:  # noqa: BLE001 — the client sees a clean end instead of a 500
-                yield f'data: {{"seq": 0, "type": "error", "data": {{"message": "{str(exc)[:200]}"}}}}\n\n'.encode()
+                yield _sse_error(str(exc)[:200])
 
         return StreamingResponse(
             _gen(), media_type="text/event-stream",
@@ -358,7 +365,9 @@ def build_router() -> APIRouter:
         """Spaces the operator allowed (setting ``vault_spaces``) — names only."""
         return {"spaces": ai_service.allowed_vault_spaces()}
 
-    @router.get("/vault/spaces/{space}")
+    # `:path` — spaces are paths below the lyndrix mount ("plugins/<id>"); a plain
+    # {space} never matched one with a slash. Only exact allowlist entries are read.
+    @router.get("/vault/spaces/{space:path}")
     async def vault_space(space: str, identity: ApiIdentity = Depends(require_permission(PERM_VAULT))):
         """Values of one allowed space. Read by the agent with its own Lyndrix
         credentials (``agent_vault``, granted to the assistant's role — not plugin

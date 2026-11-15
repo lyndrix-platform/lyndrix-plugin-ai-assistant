@@ -55,7 +55,7 @@ manifest = ModuleManifest(
     permissions={
         "subscribe": ["db:connected", "vault:ready_for_data", "system:boot_complete",
                       "plugin:settings_changed", "plugin:state_changed", "socket:response"],
-        "emit": ["socket:request"],
+        "emit": ["socket:request", "plugin:settings_changed"],
     },
     # Custom permissions are not covered by the global api:read/api:write baseline every
     # INT_USER gets on every plugin — only they gate for real. Chatting means running

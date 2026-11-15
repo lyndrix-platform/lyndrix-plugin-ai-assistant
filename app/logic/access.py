@@ -87,6 +87,17 @@ def issue_api_key() -> str:
     return raw
 
 
+def assistant_key_valid(raw: Optional[str]) -> bool:
+    """Whether a stored key still authenticates as the assistant (an admin may have
+    revoked it in the UI; the plugin then kept injecting a dead key). Blocking."""
+    if not raw:
+        return False
+    from core.components.auth.logic.api_key_service import api_key_service
+
+    resolved = api_key_service.verify(str(raw))
+    return resolved is not None and getattr(resolved, "username", None) == ASSISTANT_USERNAME
+
+
 def revoke_assistant_keys() -> int:
     """Revoke every live key this plugin issued to the assistant account (plugin
     disabled: nothing may keep acting as the agent). Idempotent; blocking."""

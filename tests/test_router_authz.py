@@ -7,6 +7,8 @@ service behind the router is a small fake — only who may call what is tested h
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -276,3 +278,16 @@ def test_instructions_come_from_the_plugin_not_the_workspace_file(client, svc, t
     """AI-04: any chat session can rewrite /workspace/CLAUDE.md; the API shows what the agent gets."""
     body = call(client, "viewer", "GET", "/instructions").json()
     assert body == {"markdown": "# Lyndrix AI Assistant (rendered by the plugin)", "source": "plugin"}
+
+
+def test_sse_error_frames_are_valid_json_whatever_the_message():
+    frame = router_mod._sse_error('runner said "no" \\ C:\\path')
+    assert frame.startswith(b"data: ") and frame.endswith(b"\n\n")
+    assert json.loads(frame[6:].decode()) == {"seq": 0, "type": "error", "data": {"message": 'runner said "no" \\ C:\\path'}}
+
+
+def test_vault_spaces_with_a_slash_are_reachable(client, svc):
+    """Spaces are paths below the lyndrix mount (plugins/<id>); `{space}` never matched them."""
+    res = call(client, "bot", "GET", "/vault/spaces/plugins/x")
+    assert res.status_code == 200 and res.json()["space"] == "plugins/x"
+    assert call(client, "bot", "GET", "/vault/spaces/plugins/../core").status_code == 404

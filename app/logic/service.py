@@ -20,6 +20,7 @@ from core.api import get_logger
 from ..model.database import db_ready, ensure_tables, get_session, retry_write
 from ..model.models import AiMessage, AiSession
 from .access import (
+    assistant_key_valid,
     ensure_assistant_user,
     issue_api_key,
     parse_vault_spaces,
@@ -34,6 +35,7 @@ from .workspace import WorkspaceManager
 log = get_logger("Plugin:AI:Service")
 
 PLUGIN_VERSION = "0.3.0"              # kept in sync with entrypoint.manifest.version by tests
+PLUGIN_ID = "lyndrix.plugin.ai_assistant"
 PROVIDERS = ("claude-code",)           # "hermes" follows once the Hermes provider exists
 # "auto" = the bridge allows every call the guardrails do not deny or flag "ask";
 # unlike bypassPermissions it keeps the deny/ask rules in force.
@@ -229,6 +231,9 @@ class AiAssistantService:
         try:
             await asyncio.to_thread(ensure_assistant_user)
             key = await asyncio.to_thread(get_secret, "assistant_api_key") if callable(get_secret) else None
+            if key and not await asyncio.to_thread(assistant_key_valid, key):
+                log.warning("The stored assistant API key is no longer valid (revoked?) — issuing a new one.")
+                key = None
             if not key:
                 key = await asyncio.to_thread(issue_api_key)
                 if callable(set_secret):
@@ -278,6 +283,15 @@ class AiAssistantService:
         await asyncio.to_thread(write_secret_dict, path, data)
         log.info(f"Claude OAuth token stored by '{by}' — restarting the runner with it.")
         await asyncio.to_thread(self.reload_settings)
+        # The core announces settings it writes itself; this write bypasses it, so tell
+        # every instance (bridged topic, never the value) — peers kept the old token.
+        emit = getattr(self.ctx, "emit", None)
+        if callable(emit):
+            try:
+                emit("plugin:settings_changed", {"plugin_id": PLUGIN_ID, "keys": ["claude_oauth_token", "claude_auth_mode"],
+                                                 "by": by}, cluster=True)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Could not announce the new Claude token to the other instances — {exc}")
         await self.ensure_runner(force=True)
 
     def start_login_finisher(self, auth_id: str, *, by: str) -> None:

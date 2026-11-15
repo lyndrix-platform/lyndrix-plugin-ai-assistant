@@ -562,3 +562,39 @@ def test_recreate_pulls_first_and_keeps_the_running_runner_when_the_pull_fails(m
     mgr, cfg, calls = _runner_with_fake_docker(monkeypatch, state=None)  # first start: spawn pulls itself
     asyncio.run(mgr.ensure(cfg))
     assert [c[0] for c in calls] == ["spawn", "update"]
+
+
+def test_a_revoked_agent_key_is_replaced_and_a_new_token_is_announced(db, monkeypatch):
+    """Minor bugs: a key revoked in the UI was injected forever; the login wrote the
+    token behind the core's back without telling the other instances."""
+    issued = []
+    monkeypatch.setattr(service_mod, "ensure_assistant_user", lambda: {"username": "ai-assistant"})
+    monkeypatch.setattr(service_mod, "assistant_key_valid", lambda raw: raw == "lyk_dummy-fresh-not-real")
+    monkeypatch.setattr(service_mod, "issue_api_key", lambda: issued.append(1) or "lyk_dummy-fresh-not-real")
+    ctx = _Ctx({"agent_api_url": "http://core:8081"})
+    ctx.secrets["assistant_api_key"] = "lyk_dummy-revoked-not-real"
+    svc = _svc(ctx, _FakeBridge())
+    env = asyncio.run(svc._agent_access_env())
+    assert env["LYNDRIX_API_KEY"] == "lyk_dummy-fresh-not-real" and issued == [1]
+    assert ctx.secrets["assistant_api_key"] == "lyk_dummy-fresh-not-real"
+    assert asyncio.run(svc._agent_access_env())["LYNDRIX_API_KEY"] == "lyk_dummy-fresh-not-real"
+    assert issued == [1]                                   # a valid key is kept, not re-issued
+
+    emitted = []
+    ctx.emit = lambda topic, payload, cluster=False: emitted.append((topic, payload, cluster))
+    ctx._get_settings_vault_path = lambda: "plugins/lyndrix.plugin.ai_assistant/settings"
+    store = {}
+    import core.components.vault.logic.kv_helper as kv
+
+    monkeypatch.setattr(kv, "read_secret_dict", lambda path: dict(store))
+    monkeypatch.setattr(kv, "write_secret_dict", lambda path, data: store.update(data))
+
+    async def no_runner(force=False):
+        return {"status": "ok"}
+
+    svc.ensure_runner = no_runner  # type: ignore[method-assign]
+    asyncio.run(svc.store_oauth_token("sk-ant-oat01-dummy-not-real", by="root"))
+    assert store["claude_oauth_token"] == "sk-ant-oat01-dummy-not-real"
+    (topic, payload, cluster), = emitted
+    assert topic == "plugin:settings_changed" and cluster is True
+    assert payload["plugin_id"] == "lyndrix.plugin.ai_assistant" and "sk-ant" not in str(payload)
