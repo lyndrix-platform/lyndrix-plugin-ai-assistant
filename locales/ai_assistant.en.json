@@ -177,8 +177,8 @@
     "runnerConfigured": "A credential is configured in the runner (not verified yet)."
   },
   "instructions": {
-    "title": "Generated instructions (CLAUDE.md)",
-    "body": "Read-only preview of the CLAUDE.md the plugin writes into the workspace: the Lyndrix base instructions, every loaded plugin's ai_instructions and the operator's extra instructions. Regenerated on every workspace sync.",
+    "title": "Agent instructions (system prompt)",
+    "body": "Read-only preview of the instructions every session gets as its system prompt: the Lyndrix base instructions, the index of the loaded plugins and the operator's extra instructions. The workspace keeps a copy as CLAUDE.md for reference; the assistant does not load it, because every session can edit the shared workspace.",
     "empty": "(empty — the workspace has not been synchronised yet)"
   },
   "logs": {

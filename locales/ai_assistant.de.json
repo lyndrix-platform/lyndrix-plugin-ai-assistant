@@ -177,8 +177,8 @@
     "runnerConfigured": "Zugangsdaten sind im Runner hinterlegt (noch nicht geprüft)."
   },
   "instructions": {
-    "title": "Generierte Instruktionen (CLAUDE.md)",
-    "body": "Schreibgeschützte Vorschau der CLAUDE.md, die das Plugin in den Workspace schreibt: Lyndrix-Grundinstruktionen, die ai_instructions aller geladenen Plugins und die Zusatzinstruktionen des Betreibers. Wird bei jedem Workspace-Sync neu erzeugt.",
+    "title": "Instruktionen des Agenten (System-Prompt)",
+    "body": "Schreibgeschützte Vorschau der Instruktionen, die jede Session als System-Prompt bekommt: Lyndrix-Grundinstruktionen, der Index der geladenen Plugins und die Zusatzinstruktionen des Betreibers. Der Workspace enthält eine Kopie als CLAUDE.md zum Nachlesen; der Assistent lädt sie nicht, weil jede Session den gemeinsamen Workspace ändern kann.",
     "empty": "(leer — der Workspace wurde noch nicht synchronisiert)"
   },
   "logs": {

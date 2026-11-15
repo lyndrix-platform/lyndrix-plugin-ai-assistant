@@ -119,3 +119,17 @@ def test_livez_needs_no_token_and_says_nothing(settings, provider):
     with TestClient(app) as client:
         assert client.get("/livez").json() == {"status": "ok"}
         assert client.get("/health").status_code == 401
+
+
+def test_workspace_settings_and_claude_md_are_not_loaded_by_default(tmp_path):
+    """AI-04: /workspace is shared and agent-writable; its .claude/settings.json (hooks,
+    allow rules) and CLAUDE.md must not configure other users' sessions. The plugin
+    sends the instructions as append_system_prompt instead."""
+    settings = Settings.from_env({"LYNDRIX_AI_WORKSPACE": str(tmp_path)})
+    assert settings.setting_sources == []
+    spec = SessionSpec(user="alice", cwd=str(tmp_path), append_system_prompt="# Lyndrix AI Assistant")
+    opts = build_options(spec, settings, can_use_tool=None, cli_path=None)
+    assert opts.setting_sources == []
+    assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "# Lyndrix AI Assistant"}
+    # explicit opt-in for a single-user setup still works
+    assert Settings.from_env({"LYNDRIX_AI_SETTING_SOURCES": "project"}).setting_sources == ["project"]

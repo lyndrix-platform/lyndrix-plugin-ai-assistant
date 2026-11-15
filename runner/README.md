@@ -31,8 +31,11 @@ Image: `ghcr.io/lyndrix-platform/lyndrix-ai-runner:<VERSION>` (built from this d
    `GET /sessions/{id}/events` (SSE), answer `permission_request` events via
    `POST /sessions/{id}/approvals/{approval_id}`.
 
-Everything the agent should know about Lyndrix goes into `/workspace/CLAUDE.md` (the plugin generates
-it); the bridge loads it through `setting_sources=["project"]`.
+Everything the agent should know about Lyndrix arrives with `POST /sessions` as `append_system_prompt`
+(the plugin renders it). The CLI loads no filesystem settings (`setting_sources=[]`): `/workspace` is
+shared by every user and writable by the agent, so `/workspace/CLAUDE.md` or `.claude/settings.json`
+(hooks, allow rules) written in one session would configure everybody else's. `LYNDRIX_AI_SETTING_SOURCES`
+opts back in for a single-user setup.
 
 ## Environment variables
 
@@ -42,12 +45,12 @@ it); the bridge loads it through `setting_sources=["project"]`.
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of | Long-lived subscription token from the login flow / `claude setup-token`. **Preferred.** |
 | `ANTHROPIC_API_KEY` | one of | Pay-per-token API key. Never set both — Claude Code would bill the API key; `/health` reports `degraded` + a warning if both are present. |
 | `LYNDRIX_AI_MODEL` | no | Default model for new sessions (a session may override it). |
-| `LYNDRIX_API_URL`, `LYNDRIX_API_KEY` | no | Pass-through for the agent's own Lyndrix API access (used per CLAUDE.md). `/health` only reports `lyndrix_api: true`; the key is never printed. |
+| `LYNDRIX_API_URL`, `LYNDRIX_API_KEY` | no | The agent's own Lyndrix API access (see the instructions), handed to each CLI. `/health` only reports `lyndrix_api: true`; the key is never printed. |
 | `LYNDRIX_AI_WORKSPACE` | no | Default `cwd` for sessions (`/workspace`). |
 | `LYNDRIX_AI_BRIDGE_PORT` | no | Listen port (`8765`). |
 | `LYNDRIX_AI_APPROVAL_TIMEOUT_SECONDS` | no | Unanswered approvals are denied after this (`600`). |
 | `LYNDRIX_AI_EVENT_BUFFER` | no | Events kept per session for `?after=` replay (`500`). |
-| `LYNDRIX_AI_SETTING_SOURCES` | no | Claude Code setting sources (`project`). Add `user` to honour `~/.claude/settings.json`. |
+| `LYNDRIX_AI_SETTING_SOURCES` | no | Claude Code setting sources, default none. `project` loads `/workspace/CLAUDE.md` + `.claude/settings.json`, `user` `~/.claude/settings.json` — only for a single-user setup. |
 | `LYNDRIX_AI_CLAUDE_BIN` | no | CLI path (`/usr/local/bin/claude`). |
 | `LYNDRIX_AI_BRIDGE_ALLOW_LOCAL` | no | `1` lets requests from inside the container reach the guarded routes (local development only). |
 | `LYNDRIX_AI_LOG_LEVEL` | no | `INFO`. Logs are JSON lines on stdout. |

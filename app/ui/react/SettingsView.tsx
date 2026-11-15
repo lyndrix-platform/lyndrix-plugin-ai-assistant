@@ -192,7 +192,7 @@ export default function SettingsView() {
         </div>
       )}
 
-      <Card title={t('instructions.title', { defaultValue: 'Generated instructions (CLAUDE.md)' })} icon="menu_book"
+      <Card title={t('instructions.title', { defaultValue: 'Agent instructions (system prompt)' })} icon="menu_book"
         actions={
           <>
             {instructionsOpen && <Button icon="refresh" label={t('common.refresh', { defaultValue: 'Refresh' })} variant="ghost" onClick={() => void loadInstructions()} />}
@@ -200,7 +200,7 @@ export default function SettingsView() {
           </>
         }>
         <p style={{ margin: 0, fontSize: '0.78rem', color: 'var(--lx-text-muted)' }}>
-          {t('instructions.body', { defaultValue: 'Read-only preview of the CLAUDE.md the plugin writes into the workspace: the Lyndrix base instructions, every loaded plugin\'s ai_instructions and the operator\'s extra instructions. Regenerated on every workspace sync.' })}
+          {t('instructions.body', { defaultValue: 'Read-only preview of the instructions every session gets as its system prompt: the Lyndrix base instructions, the index of the loaded plugins and the operator\'s extra instructions. The workspace keeps a copy as CLAUDE.md for reference; the assistant does not load it, because every session can edit the shared workspace.' })}
         </p>
         {instructionsOpen && (
           <>

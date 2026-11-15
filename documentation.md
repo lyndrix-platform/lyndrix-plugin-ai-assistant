@@ -25,8 +25,13 @@ Browser ──(SSE/REST)── Core-Instanz mit Rolle `runner` ──(HTTP, X-Br
   Runner startet auch ohne Claude-Zugangsdaten — der Login läuft in ihm.
 - **Sessions**: Die Bridge hält Sessions nur im Speicher. Nach einem Neustart legt das Plugin eine
   Session beim nächsten Senden unter derselben ID neu an (`resume` mit der gemerkten Claude-Session).
+- **Instruktionen**: Jede Session bekommt die Instruktionen als System-Prompt
+  (`append_system_prompt`) direkt vom Plugin. Die CLI lädt keine Dateien aus dem Workspace
+  (`setting_sources=[]`): weder `CLAUDE.md` noch `.claude/settings.json`. Der Workspace ist
+  gemeinsam und für den Agenten schreibbar, eine Session könnte sonst Hooks, Allow-Regeln oder
+  Anweisungen für alle anderen Sessions ablegen.
 - **Workspace**: lokales Git-Repository auf dem geteilten Speicher; optional ein Remote
-  (`workspace_repo_url`, Token nur pro Git-Befehl). `CLAUDE.md` wird generiert aus
+  (`workspace_repo_url`, Token nur pro Git-Befehl). Die Instruktionen (Kopie als `CLAUDE.md`) entstehen aus
   Grundinstruktionen, einem **Index der installierten Plugins** (Zweck aus `ai_instructions`,
   URL der vollständigen Anleitung aus `ai_instructions_route`, Core-API 1.12) und den
   Operator-Notizen (`extra_instructions`). Die Anleitung selbst liefert jedes Plugin live
@@ -97,7 +102,7 @@ das Claude-Credential und die Werte der Vault-Spaces lesen. Daraus folgt:
 | Methode | Pfad | Recht | Zweck |
 |---|---|---|---|
 | GET | `/status` | api:read | Runner, Auth, Workspace, Modus |
-| GET | `/instructions` | api:read | generierte CLAUDE.md |
+| GET | `/instructions` | api:read | Instruktionen des Agenten (System-Prompt, vom Plugin erzeugt) |
 | POST | `/workspace/sync` | api:admin | Repo aktualisieren, Instruktionen neu erzeugen |
 | POST | `/runner/restart` | api:admin | Container neu erzeugen |
 | GET | `/runner/logs?tail=` | api:admin | Container-Log |

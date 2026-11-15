@@ -135,8 +135,9 @@ def build_router() -> APIRouter:
 
     @router.get("/instructions")
     async def instructions(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
-        text = await asyncio.to_thread(ai_service.workspace.read_instructions) if ai_service.workspace else ""
-        return {"markdown": text}
+        """The instructions the agent gets (system prompt), rendered from the core's data —
+        not the workspace's CLAUDE.md, which any chat session can rewrite (AI-04)."""
+        return {"markdown": await asyncio.to_thread(ai_service.instructions_text), "source": "plugin"}
 
     @router.get("/ai/instructions")
     async def ai_instructions(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):

@@ -42,9 +42,13 @@ class Settings:
     event_buffer: int = DEFAULT_EVENT_BUFFER
     keepalive_s: float = DEFAULT_KEEPALIVE_S
     claude_bin: str | None = None
-    # "project" picks up /workspace/CLAUDE.md and /workspace/.claude/settings.json;
-    # "user" would add the agent's own ~/.claude/settings.json.
-    setting_sources: list[str] = field(default_factory=lambda: ["project"])
+    # Filesystem settings the CLI loads. Default: none (AI-04). "project" would load
+    # /workspace/CLAUDE.md and /workspace/.claude/settings.json — the workspace is shared
+    # by every user and writable by the agent, so one session could plant hooks, allow
+    # rules or instructions for everybody else's sessions. The plugin sends the
+    # instructions as append_system_prompt instead. Opt back in with
+    # LYNDRIX_AI_SETTING_SOURCES=project (and/or user) only for a single-user setup.
+    setting_sources: list[str] = field(default_factory=list)
     # Secrets, read once from the environment and then removed from it
     # (bridge.hardening.scrub_environ): the Claude credential and the agent's own
     # Lyndrix account. Handed to each CLI explicitly (cli_env), never inherited.
@@ -73,7 +77,7 @@ class Settings:
             event_buffer=int(env.get("LYNDRIX_AI_EVENT_BUFFER", DEFAULT_EVENT_BUFFER)),
             keepalive_s=float(env.get("LYNDRIX_AI_SSE_KEEPALIVE_SECONDS", DEFAULT_KEEPALIVE_S)),
             claude_bin=env.get("LYNDRIX_AI_CLAUDE_BIN") or None,
-            setting_sources=_split_csv(env.get("LYNDRIX_AI_SETTING_SOURCES"), ["project"]),
+            setting_sources=_split_csv(env.get("LYNDRIX_AI_SETTING_SOURCES"), []),
             credential_env={k: env[k] for k in CREDENTIAL_ENV if env.get(k)},
             agent_env={k: env[k] for k in AGENT_ENV if env.get(k)},
             reject_local_peers=str(env.get("LYNDRIX_AI_BRIDGE_ALLOW_LOCAL", "")).strip().lower() not in ("1", "true", "yes"),

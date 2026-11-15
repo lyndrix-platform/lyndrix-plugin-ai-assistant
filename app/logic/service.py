@@ -21,6 +21,7 @@ from ..model.database import db_ready, ensure_tables, get_session, retry_write
 from ..model.models import AiMessage, AiSession
 from .access import ensure_assistant_user, issue_api_key, parse_vault_spaces, read_vault_space
 from .bridge import BridgeClient, BridgeError
+from .instructions import collect_plugin_index, render_instructions
 from .runner import RunnerConfig, RunnerManager
 from .workspace import WorkspaceManager
 
@@ -142,6 +143,13 @@ class AiAssistantService:
             extra_instructions=self.setting("extra_instructions"),
         )
         return result
+
+    def instructions_text(self) -> str:
+        """The agent's instructions, built from the core's own data (base text, plugin
+        index from the registry, operator notes). Sent to the CLI as
+        ``append_system_prompt``; never read back from the agent-writable workspace,
+        where any session could rewrite CLAUDE.md for everybody (AI-04)."""
+        return render_instructions(collect_plugin_index(), self.setting("extra_instructions"))
 
     async def refresh_instructions(self) -> dict:
         if self.workspace is None:
@@ -452,6 +460,7 @@ class AiAssistantService:
             "user": owner, "title": title or "Neue Unterhaltung", "cwd": "/workspace",
             "permission_mode": mode, "model": self.setting("model") or None,
             "policy": self.guardrail_policy(),
+            "append_system_prompt": self.instructions_text(),
         }
         max_turns = self._max_turns()
         if max_turns:
@@ -523,6 +532,7 @@ class AiAssistantService:
                 "cwd": "/workspace", "permission_mode": mode,
                 "model": self.setting("model") or None, "policy": self.guardrail_policy(),
                 "resume": row.get("claude_session_id") or None,
+                "append_system_prompt": self.instructions_text(),
             }
             max_turns = self._max_turns()
             if max_turns:

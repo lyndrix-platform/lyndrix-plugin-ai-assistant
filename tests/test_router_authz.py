@@ -124,6 +124,9 @@ class _FakeService:
     async def status(self):
         return {"permission_mode": "default"}
 
+    def instructions_text(self):
+        return "# Lyndrix AI Assistant (rendered by the plugin)"
+
     def start_login_finisher(self, auth_id, by):
         self.calls.append(("login", auth_id, by))
 
@@ -267,3 +270,9 @@ def test_status_tells_the_ui_what_the_caller_may_do(client):
         "default", "acceptEdits", "plan", "auto", "bypassPermissions"]
     bot = call(client, "bot", "GET", "/status").json()["caller"]
     assert bot["can_chat"] is False and bot["is_admin"] is False
+
+
+def test_instructions_come_from_the_plugin_not_the_workspace_file(client, svc, tmp_path):
+    """AI-04: any chat session can rewrite /workspace/CLAUDE.md; the API shows what the agent gets."""
+    body = call(client, "viewer", "GET", "/instructions").json()
+    assert body == {"markdown": "# Lyndrix AI Assistant (rendered by the plugin)", "source": "plugin"}

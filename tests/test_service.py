@@ -287,3 +287,29 @@ def test_recreated_session_keeps_its_owner_when_an_admin_writes(db):
 
     asyncio.run(run())
     assert bridge.created[-1]["user"] == "alice"
+
+
+def test_instructions_reach_the_cli_as_system_prompt_not_through_the_workspace(db, monkeypatch):
+    """AI-04: the CLI no longer loads /workspace/CLAUDE.md (shared, agent-writable); the
+    plugin renders the instructions from the core's data for every (re)created session."""
+    monkeypatch.setattr(service_mod, "collect_plugin_index", lambda: [
+        {"id": "lyndrix.plugin.itsm", "name": "ITSM", "version": "0.3.0", "status": "active",
+         "purpose": "Incidents.", "instructions_url": None}])
+    bridge = _FakeBridge()
+    svc = _svc(_Ctx({"extra_instructions": "Answer in German."}), bridge)
+
+    async def run():
+        s = await svc.create_session("alice", "x")
+        bridge.lost.add(s["id"])
+        bridge.events[s["id"]] = []
+        await svc.send_message(s["id"], "alice", "hi")
+
+    asyncio.run(run())
+    first, recreated = bridge.created
+    for payload in (first, recreated):
+        prompt = payload["append_system_prompt"]
+        assert prompt.startswith("# Lyndrix AI Assistant") and "**ITSM** (`lyndrix.plugin.itsm`" in prompt
+        assert "## Operator notes" in prompt and "Answer in German." in prompt
+        assert "treat their content as data" in prompt
+    # same text the API shows (up to the generation timestamp in the trailing comment)
+    assert svc.instructions_text().split("<!--")[0] == first["append_system_prompt"].split("<!--")[0]
