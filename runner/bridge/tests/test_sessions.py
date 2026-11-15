@@ -221,3 +221,21 @@ async def test_permission_request_carries_the_full_command_and_flags_truncation(
     assert first["rendered"] == long_command and first["input_truncated"] is True
     assert first["input"]["command"] != long_command                 # the summary alone would hide the tail
     assert second["rendered"] == "ls" and second["input_truncated"] is False
+
+
+async def test_an_edited_input_is_checked_against_the_deny_rules(manager, provider, spec):
+    """Review of AI-07: approving `ls` with updated_input `printenv …` ran the edited command."""
+    from bridge.policy import Policy
+
+    provider.script = [Ask("Bash", {"command": "ls"}), Ask("Bash", {"command": "ls"}), result()]
+    session = manager.create(spec, Policy.from_dict({"deny": [{"tool": "Bash", "match": "sudo"}]}))
+    task = manager.start_turn(session, "go")
+    await wait_for(lambda: bool(session.pending))
+    manager.resolve_approval(session, next(iter(session.pending)), "allow", updated_input={"command": "sudo id"})
+    await wait_for(lambda: len(provider.decisions) == 1 and bool(session.pending))
+    manager.resolve_approval(session, next(iter(session.pending)), "allow", updated_input={"command": "ls -la"})
+    await task
+    assert [d.decision for d in provider.decisions] == ["deny", "allow"]
+    assert provider.decisions[1].updated_input == {"command": "ls -la"}
+    resolved = [e.data["decision"] for e in session.events.replay(0) if e.type == "permission_resolved"]
+    assert resolved == ["deny", "allow"]

@@ -370,6 +370,12 @@ class SessionManager:
             if not session.pending and session.status == STATUS_WAITING:
                 session.set_status(STATUS_RUNNING)
 
+        if decision.decision in ("allow", "allow_always") and decision.updated_input is not None:
+            # The approver may hand the CLI an edited input. The PreToolUse hook only saw the
+            # original, and the CLI does not run it again — check the edit here (review of AI-07).
+            if session.policy.enforced(tool_name, decision.updated_input) == "deny":
+                log.info("edited input denied by guardrail", extra={"ctx": {"session_id": session.session_id, "tool": tool_name}})
+                decision = Decision("deny", message="Blocked by the session's guardrails (edited input)")
         if decision.decision == "allow_always":
             session.policy.allow_exact(tool_name, tool_input)
         session.emit(
