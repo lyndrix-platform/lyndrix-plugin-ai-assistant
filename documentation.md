@@ -97,8 +97,8 @@ ask → Modus.
 Der Modus lässt sich **pro Session im Chat umschalten** (Fragen · Bearbeiten · Auto · Plan):
 `auto` erlaubt alles, was die Deny-/Ask-Regeln nicht stoppen. Es braucht das Recht `auto_mode`
 (Rollen „AI Assistant Power User“ und Admin), weil dann kein Mensch mehr freigibt und
-Prompt-Injection ungebremst wirkt. `bypassPermissions` schaltet auch die Guardrails ab und ist
-Administratoren vorbehalten. Beides wird beim Anlegen, beim Umschalten und beim Wiederherstellen
+Prompt-Injection ungebremst wirkt. `bypassPermissions` fragt nie (Deny-Regeln gelten weiter) und
+ist Administratoren vorbehalten. Beides wird beim Anlegen, beim Umschalten und beim Wiederherstellen
 einer Session nach einem Runner-Neustart geprüft. Ein Operator-Default, den der Nutzer nicht
 verwenden darf, startet die Session in `default`, und eine laufende Session in einem nicht
 (mehr) erlaubten Modus wird beim nächsten Senden auf `default` zurückgesetzt.
