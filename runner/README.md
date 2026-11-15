@@ -70,10 +70,16 @@ the right group.
 `python -m bridge` reads `LYNDRIX_AI_BRIDGE_TOKEN`, the Claude credential and `LYNDRIX_API_URL/KEY`
 once, removes them from its environment and marks itself non-dumpable (`PR_SET_DUMPABLE 0`). Each
 Claude Code process gets the Claude credential and the agent's Lyndrix account explicitly through the
-SDK's `env` option. The bridge token never reaches a child process, and `/proc/1/environ` and `mem` of
-the bridge are closed to the agent. The bridge code under `/opt/bridge` is root-owned. Every request
-from inside the container is refused (403) except `GET /livez`, the token-free probe Docker's
-HEALTHCHECK uses. The agent shares the network namespace, the plugin never does.
+SDK's `env` option. The bridge token never reaches a process the bridge starts, and `/proc/1/environ`
+and `mem` of the bridge are closed to the agent. The bridge code under `/opt/bridge` is root-owned.
+Every request from inside the container is refused (403) except the token-free `GET /livez`. The agent
+shares the network namespace, the plugin never does.
+
+Processes started with `docker exec` (and Docker HEALTHCHECKs) get the container's full env, the
+secrets included. So the image has **no HEALTHCHECK**; the plugin's watchdog probes the bridge from
+outside, and the plugin's own `docker exec` (git in the workspace) blanks the secrets. The values also
+show in `docker inspect`, and the core's `docker run -e` puts them on a command line (core follow-up
+AI-13: env-file / secret mount).
 
 Not covered: the Claude credential and the Lyndrix key sit in every CLI process's environment, so every
 session can read them. That needs an auth-injecting proxy and per-user uids (see the plugin's fix report).
@@ -81,11 +87,11 @@ session can read them. That needs an auth-injecting proxy and per-user uids (see
 ## HTTP contract
 
 All routes except `GET /livez` require `X-Bridge-Token`, and all of them except `/livez` refuse
-requests from inside the container. Errors are `{"detail": "...", "kind": "<ExceptionClass>"}`.
+requests from inside the container (`/livez` is for manual checks; the image has no HEALTHCHECK). Errors are `{"detail": "...", "kind": "<ExceptionClass>"}`.
 
 | Route | Purpose |
 |---|---|
-| `GET /livez` | `{status: ok}` — liveness only, no token, the only route answered locally |
+| `GET /livez` | `{status: ok}` — liveness only, no token, the only route answered locally (manual checks) |
 | `GET /health` | `{status: ok\|degraded, claude_version, sdk_version, bridge_version, provider, auth: oauth\|api_key\|none, auth_flow_pending, lyndrix_api, workspace, sessions, warnings[]}` |
 | `POST /auth/start` | Starts `claude setup-token` → `{auth_id, url, expires_in, expires_at}`; 409 while one is pending; 502 if the CLI prints no URL |
 | `POST /auth/submit` `{auth_id, code}` | `{ok: true, token}` **once** (never logged) or `{ok: false, error}`; either way the flow ends |

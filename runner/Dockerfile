@@ -62,9 +62,10 @@ WORKDIR /workspace
 VOLUME ["/workspace"]
 EXPOSE 8765
 
-# Token-free liveness: a token on curl's command line was readable by every process
-# in the container every 30 s. /livez is the only route the bridge answers locally.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${LYNDRIX_AI_BRIDGE_PORT:-8765}/livez" >/dev/null || exit 1
+# No Docker HEALTHCHECK: Docker runs the probe like `docker exec` — as the agent's uid
+# with the full container env, i.e. a dumpable process holding LYNDRIX_AI_BRIDGE_TOKEN
+# every 30 s (the old probe even put it on curl's command line). The plugin's watchdog
+# probes the bridge from outside; /livez stays for manual checks.
+HEALTHCHECK NONE
 
 ENTRYPOINT ["/opt/bridge/entrypoint.sh"]

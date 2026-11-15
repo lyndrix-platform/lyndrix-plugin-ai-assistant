@@ -108,7 +108,7 @@ async def test_requests_from_inside_the_container_are_refused(tmp_path, provider
     async with httpx.AsyncClient(transport=inside, base_url="http://bridge", headers=headers) as c:
         assert (await c.get("/health")).status_code == 403
         assert (await c.post("/sessions", json={"user": "x"})).status_code == 403
-        assert (await c.get("/livez")).json() == {"status": "ok"}           # Docker's HEALTHCHECK
+        assert (await c.get("/livez")).json() == {"status": "ok"}           # manual liveness check
     async with httpx.AsyncClient(transport=core, base_url="http://bridge", headers=headers) as c:
         assert (await c.get("/health")).status_code == 200
     assert Settings.from_env({"LYNDRIX_AI_BRIDGE_ALLOW_LOCAL": "1"}).reject_local_peers is False

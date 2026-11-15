@@ -6,7 +6,7 @@ and the ``/auth/*`` login flow are useful; sessions would fail with an ``error``
 event, never crash the process.
 
 Requests from inside the runner container are refused on every route except the
-token-free ``/livez`` (Docker's HEALTHCHECK): the agent shares this network
+token-free ``/livez`` (manual liveness checks): the agent shares this network
 namespace, the plugin never does (``bridge.hardening``).
 """
 
@@ -231,8 +231,8 @@ def create_app(
 
     @app.get("/livez")
     async def livez() -> dict[str, str]:
-        """Token-free liveness for Docker's HEALTHCHECK. Says nothing else: the probe used
-        to put the token on curl's command line, readable by every process in the container."""
+        """Token-free liveness for manual checks. Says nothing else. The image has no Docker
+        HEALTHCHECK: Docker runs it with the full container env, bridge token included."""
         return {"status": "ok"}
 
     @app.get("/health", dependencies=guarded)

@@ -16,7 +16,7 @@ user's session. So the bridge
   ``execve``; that is fine, their environment holds no bridge secret;
 * refuses requests that come from inside the container (:func:`is_local_peer`):
   the agent shares the bridge's network namespace, the plugin never does. Only
-  the token-free liveness probe answers locally (Docker's HEALTHCHECK).
+  the token-free liveness probe ``/livez`` answers locally.
 
 What this does NOT protect: the Claude credential and the agent's Lyndrix key
 are in every CLI process's environment by necessity, so every session can read
