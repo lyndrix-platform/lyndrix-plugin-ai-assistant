@@ -36,7 +36,7 @@ from .workspace import WorkspaceManager
 
 log = get_logger("Plugin:AI:Service")
 
-PLUGIN_VERSION = "0.3.0"              # kept in sync with entrypoint.manifest.version by tests
+PLUGIN_VERSION = "0.4.0"              # kept in sync with entrypoint.manifest.version by tests
 PLUGIN_ID = "lyndrix.plugin.ai_assistant"
 PROVIDERS = ("claude-code",)           # "hermes" follows once the Hermes provider exists
 # "auto" = the bridge allows every call the guardrails do not deny or flag "ask";
