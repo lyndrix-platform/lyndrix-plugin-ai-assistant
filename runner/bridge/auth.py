@@ -140,8 +140,12 @@ class AuthFlowManager:
         enter_delay: float = 0.4,
         nudge_after: float = 10.0,
         verifier: "Callable[[str], Awaitable[tuple[bool, str | None]]] | None" = None,
+        credential_env: "dict[str, str] | None" = None,
     ) -> None:
         self._cli_path = cli_path
+        # The configured Claude credential (Settings.credential_env). The bridge removed
+        # it from os.environ at start-up, so it is passed in instead of read from there.
+        self._credential_env = dict(credential_env or {})
         self.expires_in = expires_in
         self.url_timeout = url_timeout
         self.submit_timeout = submit_timeout
@@ -162,7 +166,7 @@ class AuthFlowManager:
         return flow if flow is not None and not flow.finished else None
 
     def status(self) -> dict[str, Any]:
-        kind, _ = detect_auth()
+        kind, _ = detect_auth(self._credential_env)
         flow = self.pending
         out: dict[str, Any] = {"pending": flow is not None, "authenticated": kind, "verified": self.last_verify}
         if flow is not None:
@@ -275,6 +279,8 @@ class AuthFlowManager:
         if token:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
             env.pop("ANTHROPIC_API_KEY", None)
+        else:
+            env.update(self._credential_env)
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._cli_path, "-p", "Reply with exactly the word OK and nothing else.",

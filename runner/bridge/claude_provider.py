@@ -304,6 +304,11 @@ def build_options(
 
     ``system_prompt`` must be the ``claude_code`` preset explicitly — the SDK
     sends an *empty* system prompt when the option is left ``None``.
+
+    ``env``: the SDK starts the CLI with ``{**os.environ, **options.env}``. The
+    bridge scrubbed its secrets from ``os.environ`` at start-up, so this is the
+    only way the CLI gets the Claude credential and the agent's Lyndrix account —
+    and the bridge token is in neither (AI-03).
     """
     system_prompt: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
     if spec.append_system_prompt:
@@ -320,6 +325,7 @@ def build_options(
         can_use_tool=can_use_tool,
         include_partial_messages=True,
         cli_path=cli_path,
+        env=settings.cli_env(),
         # NOT options.user: in 0.2.168 the transport forwards it as a subprocess
         # kwarg ("unexpected kwargs: user"); the bridge tracks the user itself.
         stderr=stderr,

@@ -4,6 +4,10 @@ Auth: every route, ``/health`` included, requires ``X-Bridge-Token`` equal to
 ``LYNDRIX_AI_BRIDGE_TOKEN``. Before a Claude credential exists only ``/health``
 and the ``/auth/*`` login flow are useful; sessions would fail with an ``error``
 event, never crash the process.
+
+Requests from inside the runner container are refused on every route except the
+token-free ``/livez`` (Docker's HEALTHCHECK): the agent shares this network
+namespace, the plugin never does (``bridge.hardening``).
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from . import __version__
 from .auth import AuthFlowError, AuthFlowManager, AuthFlowNotFound, AuthFlowNotReady, AuthFlowPending
 from .claude_provider import PERMISSION_MODES, Provider, SessionSpec
 from .config import Settings, detect_auth
+from .hardening import is_local_peer, local_addresses
 from .policy import Policy, PolicyError
 from .sessions import (
     ApprovalAlreadyResolved,
@@ -94,6 +99,28 @@ class AuthResultIn(BaseModel):
     auth_id: str = Field(min_length=1)
 
 
+class LocalPeerGuard:
+    """Pure ASGI middleware (streams pass through untouched): 403 for requests from
+    inside the container, except the liveness probe. Defence in depth — the agent
+    has no bridge token; if one ever leaks, it still cannot use it from in here."""
+
+    OPEN_PATHS = frozenset({"/livez"})
+
+    def __init__(self, app: Any, *, local: frozenset[str], enabled: bool = True) -> None:
+        self.app = app
+        self.local = local
+        self.enabled = enabled
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if self.enabled and scope.get("type") == "http" and scope.get("path") not in self.OPEN_PATHS:
+            client = scope.get("client")
+            if is_local_peer(client[0] if client else None, self.local):
+                response = JSONResponse(status_code=403, content={"detail": "requests from inside the runner are refused"})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 # -------------------------------------------------------------------- factory
 
 
@@ -108,12 +135,12 @@ def create_app(
 
         provider = ClaudeCodeProvider(settings)
     manager = SessionManager(provider, settings)
-    auth_flows = auth_flows or AuthFlowManager(getattr(provider, "cli_path", None))
+    auth_flows = auth_flows or AuthFlowManager(getattr(provider, "cli_path", None), credential_env=settings.credential_env)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.claude_version = await provider.version()
-        kind, warnings = detect_auth()
+        kind, warnings = detect_auth(settings.credential_env)
         log.info(
             "bridge ready",
             extra={
@@ -137,6 +164,11 @@ def create_app(
             await auth_flows.cancel()
 
     app = FastAPI(title="Lyndrix AI runner bridge", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.add_middleware(
+        LocalPeerGuard,
+        local=local_addresses() if settings.reject_local_peers else frozenset(),
+        enabled=settings.reject_local_peers,
+    )
     app.state.settings = settings
     app.state.manager = manager
     app.state.provider = provider
@@ -175,11 +207,17 @@ def create_app(
 
     # --------------------------------------------------------------- health
 
+    @app.get("/livez")
+    async def livez() -> dict[str, str]:
+        """Token-free liveness for Docker's HEALTHCHECK. Says nothing else: the probe used
+        to put the token on curl's command line, readable by every process in the container."""
+        return {"status": "ok"}
+
     @app.get("/health", dependencies=guarded)
     async def health() -> dict[str, Any]:
         if app.state.claude_version is None:
             app.state.claude_version = await provider.version()
-        kind, warnings = detect_auth()
+        kind, warnings = detect_auth(settings.credential_env)
         return {
             "status": "ok" if app.state.claude_version and not warnings else "degraded",
             "claude_version": app.state.claude_version,
@@ -188,7 +226,7 @@ def create_app(
             "provider": provider.name,
             "auth": kind,
             "auth_flow_pending": auth_flows.pending is not None,
-            "lyndrix_api": bool(os.environ.get("LYNDRIX_API_URL") and os.environ.get("LYNDRIX_API_KEY")),
+            "lyndrix_api": bool(settings.agent_env.get("LYNDRIX_API_URL") and settings.agent_env.get("LYNDRIX_API_KEY")),
             "workspace": settings.workspace,
             "sessions": len(manager),
             "warnings": warnings,
@@ -308,5 +346,12 @@ def create_app(
     return app
 
 
-# uvicorn entry point: ``bridge.app:app`` (see bridge/__main__.py)
-app = create_app()
+def __getattr__(name: str) -> Any:
+    """``uvicorn bridge.app:app`` keeps working, but importing this module (tests,
+    ``python -m bridge``) no longer builds an app from the environment as a side
+    effect. The hardened entry point is ``python -m bridge`` (bridge/__main__.py)."""
+    if name == "app":
+        built = create_app()
+        globals()["app"] = built
+        return built
+    raise AttributeError(name)

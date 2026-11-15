@@ -174,7 +174,10 @@ class FakeProvider:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(bridge_token=TOKEN, workspace=str(tmp_path), approval_timeout_s=5.0, keepalive_s=0.2, event_buffer=50)
+    # The SSE tests talk to a real uvicorn over loopback, which the production
+    # guard refuses (requests from inside the container); it has its own tests.
+    return Settings(bridge_token=TOKEN, workspace=str(tmp_path), approval_timeout_s=5.0, keepalive_s=0.2,
+                    event_buffer=50, reject_local_peers=False)
 
 
 @pytest.fixture

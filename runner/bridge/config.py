@@ -12,6 +12,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from .hardening import AGENT_ENV, CREDENTIAL_ENV
+
 DEFAULT_WORKSPACE = "/workspace"
 DEFAULT_PORT = 8765
 DEFAULT_APPROVAL_TIMEOUT_S = 600.0
@@ -43,6 +45,18 @@ class Settings:
     # "project" picks up /workspace/CLAUDE.md and /workspace/.claude/settings.json;
     # "user" would add the agent's own ~/.claude/settings.json.
     setting_sources: list[str] = field(default_factory=lambda: ["project"])
+    # Secrets, read once from the environment and then removed from it
+    # (bridge.hardening.scrub_environ): the Claude credential and the agent's own
+    # Lyndrix account. Handed to each CLI explicitly (cli_env), never inherited.
+    credential_env: dict[str, str] = field(default_factory=dict)
+    agent_env: dict[str, str] = field(default_factory=dict)
+    # Refuse requests from inside the container (the agent's network namespace).
+    reject_local_peers: bool = True
+
+    def cli_env(self) -> dict[str, str]:
+        """Environment a Claude Code process gets on top of the scrubbed ``os.environ``
+        — everything it needs, and never the bridge token."""
+        return {**self.credential_env, **self.agent_env}
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -60,6 +74,9 @@ class Settings:
             keepalive_s=float(env.get("LYNDRIX_AI_SSE_KEEPALIVE_SECONDS", DEFAULT_KEEPALIVE_S)),
             claude_bin=env.get("LYNDRIX_AI_CLAUDE_BIN") or None,
             setting_sources=_split_csv(env.get("LYNDRIX_AI_SETTING_SOURCES"), ["project"]),
+            credential_env={k: env[k] for k in CREDENTIAL_ENV if env.get(k)},
+            agent_env={k: env[k] for k in AGENT_ENV if env.get(k)},
+            reject_local_peers=str(env.get("LYNDRIX_AI_BRIDGE_ALLOW_LOCAL", "")).strip().lower() not in ("1", "true", "yes"),
         )
 
 
