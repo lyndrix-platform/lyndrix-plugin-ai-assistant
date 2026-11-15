@@ -123,9 +123,13 @@ das Claude-Credential und die Werte der Vault-Spaces lesen. Daraus folgt:
 - Das Konto `ai-assistant` ist nie Plugin-Admin (keine fremden Sessions, keine Runner-, Login- oder
   Workspace-Steuerung), auch wenn ein Operator ihm Admin-Rollen gibt. Ihm nur Rollen geben, die jeder
   Chat-Nutzer haben darf.
+- **Alle Chat-Nutzer müssen einander vertrauen.** Unter derselben uid kann eine
+  Werkzeug-Ausführung in laufende Sessions anderer Nutzer eingreifen: Steuer- und
+  Nutzernachrichten über `/proc/<pid>/fd/0` der fremden CLI schreiben, und alle Claude-Verläufe
+  unter `~/.claude/projects/` lesen. Die Bridge selbst (Freigaben, Token) ist dagegen geschützt.
 - Eine delegierte Identität (Agent handelt mit den Rechten des jeweiligen Nutzers) braucht einen Core
-  mit begrenzten gescopten Keys (≥ 1.12.0) und Prozess-Isolation je Nutzer im Runner. Das ist noch
-  offen.
+  mit begrenzten gescopten Keys (≥ 1.12.0) und Prozess-Isolation je Nutzer im Runner (eigene uid
+  und eigenes `CLAUDE_CONFIG_DIR` je Nutzer). Das ist noch offen.
 
 ## Verläufe
 
