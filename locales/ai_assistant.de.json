@@ -81,7 +81,7 @@
       "acceptEdits": "Dateiänderungen im Workspace laufen ohne Rückfrage, alles andere fragt.",
       "auto": "Führt jeden Werkzeugaufruf aus, sofern keine Deny-Regel blockt oder eine Ask-Regel greift.",
       "plan": "Nur lesen: Es wird nichts verändert.",
-      "bypass": "Erlaubt alles und schaltet die Guardrails ab – nur für Administratoren."
+      "bypass": "Fragt nie; Deny-Regeln gelten weiter – nur für Administratoren."
     }
   },
   "approval": {

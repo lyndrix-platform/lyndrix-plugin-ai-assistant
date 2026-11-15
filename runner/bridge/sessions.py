@@ -201,7 +201,9 @@ class SessionManager:
             # Reopen where the previous process left off.
             spec = SessionSpec(**{**spec.__dict__, "resume": session.claude_session_id})
         session.provider_session = await self._provider.open(
-            spec, approve=lambda name, inp, ctx: self._approve(session, name, inp, ctx)
+            spec,
+            approve=lambda name, inp, ctx: self._approve(session, name, inp, ctx),
+            guard=lambda name, inp: self._guard(session, name, inp),
         )
         session._cost_reported = 0.0
         return session.provider_session
@@ -293,6 +295,20 @@ class SessionManager:
         for approval in list(session.pending.values()):
             if not approval.future.done():
                 approval.future.set_result(Decision("deny", message=reason))
+
+    async def _guard(self, session: Session, tool_name: str, tool_input: dict[str, Any]) -> tuple[str | None, str | None]:
+        """PreToolUse hook: deny and ask rules for every call in every mode (AI-07)."""
+        verdict = session.policy.enforced(tool_name, tool_input)
+        if verdict == "deny":
+            session.emit(
+                "permission_resolved",
+                {"approval_id": None, "decision": "deny", "name": tool_name, "auto": True, "by": "policy"},
+            )
+            log.info("tool denied by guardrail", extra={"ctx": {"session_id": session.session_id, "tool": tool_name}})
+            return "deny", "Blocked by the session's guardrails"
+        if verdict == "ask":
+            return "ask", "A guardrail requires an approval for this call"
+        return None, None
 
     async def _approve(
         self, session: Session, tool_name: str, tool_input: dict[str, Any], context: dict[str, Any]

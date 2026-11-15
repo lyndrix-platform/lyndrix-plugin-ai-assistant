@@ -6,13 +6,14 @@ import type { Phase } from './model'
 const MAX_ROWS = 10
 
 /** Approval modes the operator can switch per session. `auto` = run every tool the
- *  deny/ask guardrails do not stop; `bypassPermissions` also drops the guardrails (admins). */
+ *  deny/ask guardrails do not stop (permission auto_mode); `bypassPermissions` never asks,
+ *  deny rules still apply (admins). */
 const MODES: { id: string; icon: string; labelKey: string; label: string; hintKey: string; hint: string; admin?: boolean }[] = [
   { id: 'default', icon: 'help_outline', labelKey: 'composer.mode.default', label: 'Ask', hintKey: 'composer.modeHint.default', hint: 'Every tool call asks for your approval.' },
   { id: 'acceptEdits', icon: 'edit_note', labelKey: 'composer.mode.acceptEdits', label: 'Edits', hintKey: 'composer.modeHint.acceptEdits', hint: 'File edits in the workspace run without asking; everything else asks.' },
   { id: 'auto', icon: 'bolt', labelKey: 'composer.mode.auto', label: 'Auto', hintKey: 'composer.modeHint.auto', hint: 'Runs every tool call unless a deny rule blocks it or an ask rule flags it.' },
   { id: 'plan', icon: 'visibility', labelKey: 'composer.mode.plan', label: 'Plan', hintKey: 'composer.modeHint.plan', hint: 'Read-only: nothing is changed.' },
-  { id: 'bypassPermissions', icon: 'warning_amber', labelKey: 'composer.mode.bypass', label: 'Bypass', hintKey: 'composer.modeHint.bypass', hint: 'Allows everything and disables the guardrails — administrators only.', admin: true },
+  { id: 'bypassPermissions', icon: 'warning_amber', labelKey: 'composer.mode.bypass', label: 'Bypass', hintKey: 'composer.modeHint.bypass', hint: 'Never asks; deny rules still apply — administrators only.', admin: true },
 ]
 
 export default function Composer({ phase, disabled, disabledHint, onSend, onInterrupt, compact, autoFocus, permissionMode, onChangeMode, isAdmin, allowedModes }: {

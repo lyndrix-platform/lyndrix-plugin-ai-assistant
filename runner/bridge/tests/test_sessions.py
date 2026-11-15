@@ -128,7 +128,7 @@ async def test_allow_always_adds_exact_rule_and_skips_next_prompt(manager, provi
     assert len(pending) == 2 and pending[1].data["rendered"] == "git push"
     manager.resolve_approval(session, next(iter(session.pending)), "deny")
     await task
-    assert session.policy.to_dict()["allow"] == [{"tool": "Bash", "match": f"^{re.escape('git status')}$"}]
+    assert session.policy.to_dict()["allow"] == [{"tool": "Bash", "match": re.escape("git status") + r"\Z", "exact": True}]
 
 
 async def test_policy_auto_allow_and_deny(manager, provider, spec):
@@ -189,3 +189,18 @@ async def test_close_while_waiting_for_approval_denies_it(manager, provider, spe
     await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2)
     assert provider.decisions and provider.decisions[0].decision == "deny"
     assert session.status == STATUS_CLOSED
+
+
+async def test_session_guard_denies_and_reports_like_an_approval(manager, provider, spec):
+    """The guard the provider wires into the PreToolUse hook (AI-07)."""
+    from bridge.policy import Policy
+
+    session = manager.create(spec, Policy.from_dict({"deny": [{"tool": "Bash", "match": "sudo"}]}))
+    task = manager.start_turn(session, "hi")
+    await task
+    guard = provider.sessions[-1].guard
+    assert await guard("Bash", {"command": "sudo id"}) == ("deny", "Blocked by the session's guardrails")
+    assert await guard("Bash", {"command": "cat /proc/1/environ"}) == ("deny", "Blocked by the session's guardrails")
+    assert await guard("Bash", {"command": "ls"}) == (None, None)
+    denied = [e.data for e in session.events.replay(0) if e.type == "permission_resolved"]
+    assert [d["decision"] for d in denied] == ["deny", "deny"] and all(d["auto"] for d in denied)

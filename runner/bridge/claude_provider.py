@@ -31,6 +31,7 @@ from claude_agent_sdk import (
     CanUseToolShadowedWarning,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
@@ -98,6 +99,9 @@ class Decision:
 
 # (tool_name, tool_input, context) -> Decision ; context is a plain dict
 ApprovalCallback = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[Decision]]
+# (tool_name, tool_input) -> ("deny" | "ask" | None, reason): enforced for EVERY tool call
+# through a PreToolUse hook, also where the CLI never consults can_use_tool (AI-07).
+GuardCallback = Callable[[str, dict[str, Any]], Awaitable[tuple[str | None, str | None]]]
 
 
 class ProviderSession(Protocol):
@@ -110,7 +114,9 @@ class ProviderSession(Protocol):
 class Provider(Protocol):
     name: str
 
-    async def open(self, spec: SessionSpec, *, approve: ApprovalCallback) -> ProviderSession: ...
+    async def open(
+        self, spec: SessionSpec, *, approve: ApprovalCallback, guard: GuardCallback | None = None
+    ) -> ProviderSession: ...
     async def version(self) -> str | None: ...
 
 
@@ -292,6 +298,33 @@ def to_permission_result(decision: Decision) -> PermissionResultAllow | Permissi
     return PermissionResultDeny(message=decision.message or "Denied by user")
 
 
+def pre_tool_use_hook(guard: GuardCallback) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """SDK hook callback enforcing the session guard. ``can_use_tool`` only runs when the
+    CLI decides to ask — never in bypassPermissions, never for edits in acceptEdits, never
+    for calls the CLI allows on its own. PreToolUse fires for every call in every mode, so
+    deny rules (and ask rules) hold everywhere. No decision → the CLI's normal flow."""
+
+    async def hook(input_data: Any, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        data = input_data if isinstance(input_data, dict) else {}
+        tool_input = data.get("tool_input")
+        try:
+            verdict, reason = await guard(str(data.get("tool_name") or ""), tool_input if isinstance(tool_input, dict) else {})
+        except Exception as exc:  # noqa: BLE001 — a broken guard must not wave calls through
+            log.exception("guard failed — denying the tool call", extra={"ctx": {"tool": data.get("tool_name")}})
+            verdict, reason = "deny", f"guardrail evaluation failed: {exc.__class__.__name__}"
+        if verdict not in ("deny", "ask"):
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": verdict,
+                "permissionDecisionReason": reason or "Lyndrix session guardrails",
+            }
+        }
+
+    return hook
+
+
 def build_options(
     spec: SessionSpec,
     settings: Settings,
@@ -299,6 +332,7 @@ def build_options(
     can_use_tool: Any,
     cli_path: str | None,
     stderr: Callable[[str], None] | None = None,
+    guard: GuardCallback | None = None,
 ) -> ClaudeAgentOptions:
     """Translate a session spec into SDK options.
 
@@ -326,6 +360,7 @@ def build_options(
         include_partial_messages=True,
         cli_path=cli_path,
         env=settings.cli_env(),
+        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use_hook(guard)])]} if guard else None,
         # NOT options.user: in 0.2.168 the transport forwards it as a subprocess
         # kwarg ("unexpected kwargs: user"); the bridge tracks the user itself.
         stderr=stderr,
@@ -380,7 +415,9 @@ class ClaudeCodeProvider:
         match = re.search(r"(\d+\.\d+\.\d+)", out.decode(errors="ignore"))
         return match.group(1) if match else None
 
-    async def open(self, spec: SessionSpec, *, approve: ApprovalCallback) -> ClaudeCodeSession:
+    async def open(
+        self, spec: SessionSpec, *, approve: ApprovalCallback, guard: GuardCallback | None = None
+    ) -> ClaudeCodeSession:
         async def can_use_tool(
             tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
         ) -> PermissionResultAllow | PermissionResultDeny:
@@ -391,7 +428,7 @@ class ClaudeCodeProvider:
             log.info("claude stderr", extra={"ctx": {"user": spec.user, "line": line[:500]}})
 
         options = build_options(
-            spec, self._settings, can_use_tool=can_use_tool, cli_path=self.cli_path, stderr=on_stderr
+            spec, self._settings, can_use_tool=can_use_tool, cli_path=self.cli_path, stderr=on_stderr, guard=guard
         )
         client = ClaudeSDKClient(options)
         await client.connect()

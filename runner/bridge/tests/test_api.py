@@ -195,7 +195,7 @@ async def test_approval_endpoint(http, provider):
     await wait_for(lambda: bool(provider.decisions) and provider.decisions[0].decision == "allow_always")
     assert (await http.post(f"/sessions/{session_id}/approvals/{approval_id}", json={"decision": "allow"})).status_code == 404
     detail = (await http.get(f"/sessions/{session_id}")).json()
-    assert detail["policy"]["allow"] == [{"tool": "Bash", "match": "^ls$"}]
+    assert detail["policy"]["allow"] == [{"tool": "Bash", "match": r"ls\Z", "exact": True}]
 
 
 async def test_auth_status_without_flow(client, monkeypatch):

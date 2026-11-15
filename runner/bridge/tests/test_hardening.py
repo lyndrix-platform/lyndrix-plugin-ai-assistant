@@ -133,3 +133,42 @@ def test_workspace_settings_and_claude_md_are_not_loaded_by_default(tmp_path):
     assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "# Lyndrix AI Assistant"}
     # explicit opt-in for a single-user setup still works
     assert Settings.from_env({"LYNDRIX_AI_SETTING_SOURCES": "project"}).setting_sources == ["project"]
+
+
+async def test_guardrails_are_enforced_in_every_mode_through_a_pre_tool_use_hook(tmp_path):
+    """AI-07: can_use_tool never runs in bypassPermissions, for edits in acceptEdits or
+    for calls the CLI allows itself. The PreToolUse hook sees every call."""
+    from bridge.claude_provider import pre_tool_use_hook
+    from bridge.policy import Policy
+
+    policy = Policy.from_dict({"deny": [{"tool": "Bash", "match": "sudo"}], "ask": [{"tool": "Edit", "match": r"\.env$"}]})
+
+    async def guard(name, tool_input):
+        verdict = policy.enforced(name, tool_input)
+        return verdict, "test"
+
+    for mode in ("default", "acceptEdits", "bypassPermissions", "plan", "auto"):
+        spec = SessionSpec(user="alice", cwd=str(tmp_path), permission_mode=mode)
+        opts = build_options(spec, Settings(workspace=str(tmp_path)), can_use_tool=None, cli_path=None, guard=guard)
+        (matcher,) = opts.hooks["PreToolUse"]
+        assert matcher.matcher is None                                   # every tool
+        hook = matcher.hooks[0]
+        out = await hook({"tool_name": "Bash", "tool_input": {"command": "sudo id"}}, "toolu_1", None)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny", mode
+        out = await hook({"tool_name": "Edit", "tool_input": {"file_path": "/w/.env"}}, "toolu_2", None)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "ask", mode
+        assert await hook({"tool_name": "Read", "tool_input": {"file_path": "/w/a"}}, None, None) == {}
+        out = await hook({"tool_name": "Bash", "tool_input": {"command": "printenv"}}, None, None)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"   # built-in, every mode
+    assert pre_tool_use_hook(guard) is not None
+    assert build_options(SessionSpec(user="a", cwd=str(tmp_path)), Settings(), can_use_tool=None, cli_path=None).hooks is None
+
+
+async def test_a_failing_guard_denies_instead_of_waving_the_call_through():
+    from bridge.claude_provider import pre_tool_use_hook
+
+    async def broken(name, tool_input):
+        raise RuntimeError("boom")
+
+    out = await pre_tool_use_hook(broken)({"tool_name": "Bash", "tool_input": {"command": "ls"}}, None, None)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"

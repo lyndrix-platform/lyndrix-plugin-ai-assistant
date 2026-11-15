@@ -81,7 +81,7 @@
       "acceptEdits": "File edits in the workspace run without asking; everything else asks.",
       "auto": "Runs every tool call unless a deny rule blocks it or an ask rule flags it.",
       "plan": "Read-only: nothing is changed.",
-      "bypass": "Allows everything and disables the guardrails — administrators only."
+      "bypass": "Never asks; deny rules still apply — administrators only."
     }
   },
   "approval": {

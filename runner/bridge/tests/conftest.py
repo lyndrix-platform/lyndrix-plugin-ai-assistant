@@ -111,10 +111,11 @@ Script = list[Any] | Callable[[str], list[Any]]
 
 
 class FakeProviderSession:
-    def __init__(self, provider: "FakeProvider", spec: SessionSpec, approve: ApprovalCallback) -> None:
+    def __init__(self, provider: "FakeProvider", spec: SessionSpec, approve: ApprovalCallback, guard: Any = None) -> None:
         self.provider = provider
         self.spec = spec
         self.approve = approve
+        self.guard = guard            # what the real provider wires into the PreToolUse hook
         self.closed = False
 
     async def send(self, content: str) -> AsyncIterator[Any]:
@@ -157,13 +158,15 @@ class FakeProvider:
         self.decisions: list[Decision] = []
         self.interrupted = 0
         self.closed = 0
+        self.sessions: list[FakeProviderSession] = []
 
     def script_for(self, content: str) -> list[Any]:
         return self.script(content) if callable(self.script) else self.script
 
-    async def open(self, spec: SessionSpec, *, approve: ApprovalCallback) -> FakeProviderSession:
+    async def open(self, spec: SessionSpec, *, approve: ApprovalCallback, guard: Any = None) -> FakeProviderSession:
         self.opened.append(spec)
-        return FakeProviderSession(self, spec, approve)
+        self.sessions.append(FakeProviderSession(self, spec, approve, guard))
+        return self.sessions[-1]
 
     async def version(self) -> str | None:
         return "2.1.301"

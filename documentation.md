@@ -62,11 +62,23 @@ vor dem Subscription-Token.
 ## Werkzeug-Freigaben (Guardrails)
 
 `permission_mode` wie in der App: `default` fragt bei jedem Werkzeug, `acceptEdits` erlaubt
-Dateiänderungen im Workspace, `plan` verändert nichts, `bypassPermissions` erlaubt alles
-(nur in der Sandbox). Zusätzlich drei Regellisten (`;`-getrennt, `Tool` oder `Tool: regex`
-gegen Befehl bzw. Pfad): `guardrails_allow` läuft ohne Rückfrage, `guardrails_ask` fragt
-immer, `guardrails_deny` lehnt ab. Auswertung in der Bridge: deny → allow → ask → Modus.
-Eine Freigabe „Immer erlauben“ im Chat gilt für die Session.
+Dateiänderungen im Workspace, `plan` verändert nichts, `bypassPermissions` fragt nie (Deny-Regeln
+gelten weiter). Zusätzlich drei Regellisten (`;`-getrennt, `Tool` oder `Tool: regex` gegen Befehl
+bzw. Pfad): `guardrails_allow` läuft ohne Rückfrage, `guardrails_ask` fragt immer,
+`guardrails_deny` lehnt ab. Auswertung in der Bridge: eingebaute Deny-Regeln → deny → allow →
+ask → Modus.
+- Deny- und Ask-Regeln setzt ein **PreToolUse-Hook** für *jeden* Werkzeugaufruf in *jedem* Modus
+  durch, auch dort, wo die CLI selbst nicht fragt (Lese-Werkzeuge, `acceptEdits`, Deny auch
+  `bypassPermissions`). Sie treffen überall im Befehl, auch bei zusammengezogenen Leerzeichen.
+- Allow-Regeln gelten ab dem Anfang des Befehls bzw. Pfads und decken nie einen Bash-Befehl
+  mit `; & | ` $( < >` oder Zeilenumbruch ab: `git status; curl …` fällt nicht mehr unter
+  `^git status`.
+- Eingebaut und immer aktiv: kein Umgebungs-Dump (`env`, `printenv`, `export -p`), kein
+  `/proc/*/environ`, keine Erwähnung der Claude-/Bridge-Credential-Variablen, keine Änderungen
+  unter `.git/`. Das sind Sicherheitsgurte gegen Prompt-Injection, keine Grenze gegen einen
+  entschlossenen Nutzer.
+- Eine Freigabe „Immer erlauben“ im Chat gilt für die Session, und zwar nur für genau diesen
+  Aufruf.
 Der Modus lässt sich **pro Session im Chat umschalten** (Fragen · Bearbeiten · Auto · Plan):
 `auto` erlaubt alles, was die Deny-/Ask-Regeln nicht stoppen. Es braucht das Recht `auto_mode`
 (Rollen „AI Assistant Power User“ und Admin), weil dann kein Mensch mehr freigibt und
