@@ -73,7 +73,19 @@ Mit `agent_lyndrix_access` (Standard an) legt das Plugin den Benutzer `ai-assist
 und `LYNDRIX_API_KEY` in den Container. Welche Rechte der Agent hat, entscheidet die
 Benutzerverwaltung — Rollen und Gruppen wie bei jedem anderen Benutzer. Vault-Spaces
 (`vault_spaces`, Komma-Liste unterhalb des `lyndrix`-Mounts) liest der Agent über
-`GET /vault/spaces/<space>` des Plugins; jeder Zugriff wird protokolliert.
+`GET /vault/spaces/<space>` des Plugins (Recht `agent_vault`); jeder Zugriff wird protokolliert.
+
+**Wichtig – wer chatten darf, handelt mit diesem Konto.** Alle Sessions laufen im selben
+Runner-Container unter derselben uid. Eine Werkzeug-Ausführung kann deshalb den Key des Agenten,
+das Claude-Credential und die Werte der Vault-Spaces lesen. Daraus folgt:
+- Chatten erfordert das eigene Recht `chat` (Rolle „AI Assistant User“ oder Admin). Die
+  Core-Grundausstattung `api:write`, die jeder `INT_USER` auf jedes Plugin bekommt, reicht nicht.
+- Das Konto `ai-assistant` ist nie Plugin-Admin (keine fremden Sessions, keine Runner-, Login- oder
+  Workspace-Steuerung), auch wenn ein Operator ihm Admin-Rollen gibt. Ihm nur Rollen geben, die jeder
+  Chat-Nutzer haben darf.
+- Eine delegierte Identität (Agent handelt mit den Rechten des jeweiligen Nutzers) braucht einen Core
+  mit begrenzten gescopten Keys (≥ 1.12.0) und Prozess-Isolation je Nutzer im Runner. Das ist noch
+  offen.
 
 ## API
 
@@ -85,16 +97,20 @@ Benutzerverwaltung — Rollen und Gruppen wie bei jedem anderen Benutzer. Vault-
 | POST | `/runner/restart` | api:admin | Container neu erzeugen |
 | GET | `/runner/logs?tail=` | api:admin | Container-Log |
 | POST/GET/DELETE | `/auth/start`, `/auth/submit`, `/auth/status`, `/auth/{id}` | api:admin | Claude-Login über die CLI (starten, Code senden, Stand, abbrechen) |
-| GET/POST | `/sessions` | api:read / api:write | eigene Sessions (Admins: `?all=true`) |
+| GET/POST | `/sessions` | api:read / chat | eigene Sessions (Admins: `?all=true`) |
 | GET | `/sessions/{id}` | api:read | Session, Verlauf, Live-Zustand |
-| POST | `/sessions/{id}/messages` | api:write | Nachricht senden (202) |
+| POST | `/sessions/{id}/messages` | chat | Nachricht senden (202) |
 | GET | `/sessions/{id}/events?after=` | api:read | SSE-Strom der laufenden Runde |
-| POST | `/sessions/{id}/approvals/{aid}` | api:write | allow / deny / allow_always |
-| POST | `/sessions/{id}/interrupt`, DELETE `/sessions/{id}` | api:write | abbrechen, schließen |
-| GET | `/vault/spaces`, `/vault/spaces/{space}` | api:read / api:admin | erlaubte Spaces, Werte |
+| POST | `/sessions/{id}/approvals/{aid}` | chat | allow / deny / allow_always |
+| POST | `/sessions/{id}/permission-mode`, `/sessions/{id}/interrupt` | chat | Modus wechseln, abbrechen |
+| DELETE | `/sessions/{id}` | api:write | schließen |
+| GET | `/vault/spaces`, `/vault/spaces/{space}` | api:read / agent_vault | erlaubte Spaces, Werte |
 
-Rollen: `viewer` (lesen), `user` (chatten, freigeben), `agent` (Konto des Assistenten),
-`admin` (alles; automatisch für `INT_ADMIN`).
+Session-Routen gelten nur für eigene Sessions; Admins sehen alle. Admin-Routen und `chat`
+verweigern das Konto `ai-assistant` immer.
+
+Rollen: `viewer` (lesen), `user` (chatten, freigeben: `chat`), `agent` (Konto des Assistenten:
+`api:read` + `agent_vault`), `admin` (alles; automatisch für `INT_ADMIN`).
 
 ## Entwicklung
 

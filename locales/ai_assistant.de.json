@@ -14,7 +14,7 @@
   },
   "chat": {
     "runnerUnavailable": "Der Assistenten-Runner ist gerade nicht verfügbar.",
-    "readOnly": "Du kannst Unterhaltungen lesen, aber nicht schreiben (Schreibrecht für das Plugin erforderlich).",
+    "readOnly": "Du kannst Unterhaltungen lesen, aber nicht chatten (dafür ist das Chat-Recht des Assistenten nötig).",
     "notAuthenticatedShort": "Claude ist nicht angemeldet.",
     "notOwner": "Diese Unterhaltung gehört einem anderen Benutzer (nur lesen).",
     "streamLost": "Live-Verbindung zum Runner verloren; der Verlauf wurde neu geladen.",

@@ -122,13 +122,14 @@ export default function ChatView({ compact = false }: { compact?: boolean }) {
 
   // ── derived ────────────────────────────────────────────────────────────────
   const authNone = status?.auth_mode === 'none'
-  const canChat = access.canWrite && !authNone && (runnerUp || !status)
+  const canChat = access.canChat && !authNone && (runnerUp || !status)
   const current = chat.session ?? sessions.find((s) => s.id === selectedId) ?? null
   const ownsCurrent = !current || current.owner === access.username || access.isAdmin || !access.loaded
-  const canWriteCurrent = access.canWrite && ownsCurrent
+  // Sending, approving and switching modes run tools in the runner: custom permission `chat`.
+  const canWriteCurrent = access.canChat && ownsCurrent
 
-  const composerHint = !access.canWrite
-    ? t('chat.readOnly', { defaultValue: 'You can read conversations but not write (plugin write permission required).' })
+  const composerHint = !access.canChat
+    ? t('chat.readOnly', { defaultValue: 'You can read conversations but not chat (the assistant\'s chat permission is required).' })
     : authNone
       ? t('chat.notAuthenticatedShort', { defaultValue: 'Claude is not signed in.' })
       : !runnerUp

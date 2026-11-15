@@ -11,6 +11,8 @@ export const SHELL_PLUGIN_ID = 'lyndrix-plugin-ai_assistant'
 export const PERM_READ = `plugin:${PLUGIN_ID}:api:read`
 export const PERM_WRITE = `plugin:${PLUGIN_ID}:api:write`
 export const PERM_ADMIN = `plugin:${PLUGIN_ID}:api:admin`
+/** Run tools in the shared runner (custom permission — not implied by api:write). */
+export const PERM_CHAT = `plugin:${PLUGIN_ID}:chat`
 
 const TOKEN_KEY = 'lyndrix_token'
 const REQUEST_TIMEOUT_MS = 20_000

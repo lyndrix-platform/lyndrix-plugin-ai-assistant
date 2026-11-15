@@ -14,7 +14,7 @@
   },
   "chat": {
     "runnerUnavailable": "The assistant runner is not available right now.",
-    "readOnly": "You can read conversations but not write (plugin write permission required).",
+    "readOnly": "You can read conversations but not chat (the assistant's chat permission is required).",
     "notAuthenticatedShort": "Claude is not signed in.",
     "notOwner": "This conversation belongs to another user (read-only).",
     "streamLost": "Lost the live connection to the runner; the transcript was reloaded.",

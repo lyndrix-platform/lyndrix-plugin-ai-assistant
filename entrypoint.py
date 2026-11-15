@@ -57,23 +57,35 @@ manifest = ModuleManifest(
                       "plugin:settings_changed", "plugin:state_changed", "socket:response"],
         "emit": ["socket:request"],
     },
+    # Custom permissions are not covered by the global api:read/api:write baseline every
+    # INT_USER gets on every plugin — only they gate for real. Chatting means running
+    # tools in the one shared runner container (Claude credential, the agent's Lyndrix
+    # key), so it is an explicit grant (`chat`), not plugin write access (AI-01).
     custom_permissions=[
         {"id": "api:admin", "label": "Assistant administration",
-         "description": "Runner, workspace, Claude login and Vault-space access."},
+         "description": "Runner, workspace, Claude login, guardrails and every user's sessions."},
+        {"id": "chat", "label": "Chat with the assistant",
+         "description": "Start sessions, send messages and approve the assistant's tool calls. The calls run in the "
+                        "shared runner container, which also holds the Claude credential — grant only to trusted users."},
+        {"id": "agent_vault", "label": "Read the agent's Vault spaces",
+         "description": "Values of the Vault spaces listed in the setting vault_spaces (the assistant's own account)."},
     ],
     roles=[
         {"id": "viewer", "label": "AI Assistant Viewer",
          "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read"],
-         "auto_map_groups": [], "description": "Read chat sessions."},
+         "auto_map_groups": [], "description": "Read own chat sessions."},
         {"id": "user", "label": "AI Assistant User",
-         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write"],
+         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
+                         "plugin:lyndrix.plugin.ai_assistant:chat"],
          "auto_map_groups": [], "description": "Chat with the assistant and approve its tool calls."},
         {"id": "agent", "label": "AI Assistant Agent",
-         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:admin"],
-         "auto_map_groups": [], "description": "The assistant's own account: read status and allowed Vault spaces."},
+         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:agent_vault"],
+         "auto_map_groups": [], "description": "The assistant's own account: read status and the allowed Vault spaces. "
+                                               "Never plugin admin — every chat user can act through it."},
         {"id": "admin", "label": "AI Assistant Administrator",
          "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
-                         "plugin:lyndrix.plugin.ai_assistant:api:admin"],
+                         "plugin:lyndrix.plugin.ai_assistant:api:admin", "plugin:lyndrix.plugin.ai_assistant:chat",
+                         "plugin:lyndrix.plugin.ai_assistant:agent_vault"],
          "auto_map_groups": ["INT_ADMIN"], "description": "Full control: login, runner, workspace, guardrails."},
     ],
     settings_schema=[
@@ -91,7 +103,7 @@ manifest = ModuleManifest(
         {"key": "runner_image", "label": "Runner image", "kind": "str", "default": "ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest",
          "category": "Runner", "description": "Container image with Claude Code + bridge. Changing it recreates the runner."},
         {"key": "agent_lyndrix_access", "label": "Agent gets its own Lyndrix account", "kind": "bool", "default": "true",
-         "category": "Runner", "description": "Creates the user `ai-assistant` (bot) with an API key and passes LYNDRIX_API_URL/KEY into the runner. Grant it roles in the Users page."},
+         "category": "Runner", "description": "Creates the user `ai-assistant` (bot) with an API key and passes LYNDRIX_API_URL/KEY into the runner. Every user with the chat permission can act through this account (tool calls in the shared runner can read the key) — grant it only roles every chat user may have. It is never plugin admin."},
         {"key": "agent_api_url", "label": "Lyndrix API URL for the agent", "kind": "str", "category": "Runner",
          "description": "How the runner reaches this instance. Empty = http://<this container>:8081 on the shared Docker network."},
         {"key": "workspace_repo_url", "label": "Workspace repository", "kind": "str", "category": "Workspace",
@@ -111,7 +123,7 @@ manifest = ModuleManifest(
         {"key": "guardrails_deny", "label": "Always deny", "kind": "str", "category": "Guardrails",
          "description": "Rules that are refused without asking, e.g. 'Bash: rm -rf; Bash: curl .*\\| *sh'."},
         {"key": "vault_spaces", "label": "Vault spaces for the agent", "kind": "str", "category": "Guardrails",
-         "description": "Comma-separated KV spaces below the lyndrix mount the agent may read via the plugin API, e.g. 'plugins/lyndrix.plugin.docker'. Empty = none."},
+         "description": "Comma-separated KV spaces below the lyndrix mount the agent may read via the plugin API, e.g. 'plugins/lyndrix.plugin.docker'. Every chat user can read these values through the agent. Empty = none."},
         {"key": "max_turns", "label": "Max agent turns per message", "kind": "int", "default": "40", "category": "Guardrails"},
         {"key": "sync_workspace", "label": "Sync workspace & instructions", "kind": "action",
          "action": "/workspace/sync", "method": "POST", "category": "Workspace"},
