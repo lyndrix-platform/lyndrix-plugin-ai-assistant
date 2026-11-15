@@ -364,34 +364,58 @@ class _SlowBridge(_FakeBridge):
         await self.forever.wait()
 
 
-def test_a_cancelled_recorder_keeps_the_text_and_never_leaves_the_row_running(db):
-    """AI-10: plugin reload/disable cancels the recorder (CancelledError is no Exception)."""
+def test_a_reload_mid_turn_keeps_the_text_and_the_next_incarnation_records_the_rest(db):
+    """AI-10: plugin reload/disable cancels the recorder (CancelledError is no Exception).
+    The streamed text is kept, the row stays "running", and the new incarnation's
+    re-attach follows the turn to its end (the review caught that marking the row idle on
+    cancel hid the turn from the re-attach)."""
     bridge = _SlowBridge()
     svc = _svc(_Ctx({}), bridge)
 
     async def run():
         s = await svc.create_session("alice", "x")
-        bridge.events[s["id"]] = [
+        sid = s["id"]
+        bridge.events[sid] = [
             {"seq": 1, "type": "status", "data": {"state": "running"}},
             {"seq": 2, "type": "assistant_text", "data": {"text": "Half an ", "delta": True}},
             {"seq": 3, "type": "assistant_text", "data": {"text": "answer", "delta": True}},
         ]
-        await svc.send_message(s["id"], "alice", "go")
-        task = svc._recorders[s["id"]]
+        await svc.send_message(sid, "alice", "go")
+        task = svc._recorders[sid]
         for _ in range(100):
-            if svc._last_seq(s["id"]) == 3:
+            if svc._last_seq(sid) == 3:
                 break
             await asyncio.sleep(0.01)
-        task.cancel()                                       # what ctx.dispose() does
+        task.cancel()                                       # what ctx.dispose() does on reload
         with pytest.raises(asyncio.CancelledError):
             await task
-        return s["id"]
+        with db() as dbs:
+            assert dbs.get(AiSession, sid).status == "running"  # left for the re-attach
+
+        # the reloaded plugin: a fresh service object, same DB, the runner kept the turn going
+        new = _svc(_Ctx({}), bridge)
+
+        class _Runner:
+            client = object()
+
+        new.runner = _Runner()
+        bridge.live_status[sid] = "running"
+        bridge.last_seq[sid] = 5
+        bridge.events[sid] = [
+            {"seq": 4, "type": "assistant_text", "data": {"text": "lost in the gap", "delta": True}},
+            {"seq": 6, "type": "assistant_text", "data": {"text": "The rest.", "delta": False}},
+            {"seq": 7, "type": "result", "data": {"subtype": "success", "total_cost_usd": 0.01}},
+        ]
+        await new._reattach_recorders()
+        await asyncio.wait_for(new._recorders[sid], 5)
+        return sid
 
     sid = asyncio.run(run())
     with db() as s:
-        assert s.get(AiSession, sid).status == "idle"
+        row = s.get(AiSession, sid)
+        assert row.status == "idle" and row.turns == 1
         texts = [m.content for m in s.query(AiMessage).filter(AiMessage.session_id == sid, AiMessage.role == "assistant")]
-    assert texts == ["Half an answer"]
+    assert texts == ["Half an answer", "The rest."]
 
 
 def test_the_next_incarnation_reattaches_to_running_turns_and_frees_dead_ones(db):
@@ -447,11 +471,23 @@ def test_disable_removes_the_runner_and_revokes_the_agent_keys(db, monkeypatch):
     svc = _svc(ctx, _FakeBridge())
     svc.runner = _Runner()
 
+    async def busy_session():
+        s = await svc.create_session("alice", "x")
+        with db() as dbs:
+            dbs.get(AiSession, s["id"]).status = "running"
+            dbs.commit()
+        return s["id"]
+
+    sid = asyncio.run(busy_session())
     asyncio.run(svc.shutdown(disabling=False))                  # reload/upgrade: runner stays
     assert calls == [] and ctx.secrets["assistant_api_key"] == "dummy-key-not-real"
+    with db() as dbs:
+        assert dbs.get(AiSession, sid).status == "running"     # the next incarnation re-attaches
     asyncio.run(svc.shutdown(disabling=True))
     assert calls == ["rm", "revoke"] and ctx.secrets["assistant_api_key"] == ""
     assert svc.is_runner_host is False
+    with db() as dbs:
+        assert dbs.get(AiSession, sid).status == "idle"        # its bridge session went with the runner
 
 
 def test_teardown_tells_disable_from_reload(monkeypatch):

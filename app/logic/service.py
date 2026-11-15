@@ -423,6 +423,12 @@ class AiAssistantService:
         if self.runner is not None:
             await self.runner.remove()
         if self.is_ready:
+            # The bridge sessions went with the container: no turn of a busy row goes on.
+            try:
+                for sid in await asyncio.to_thread(self._busy_session_ids):
+                    await self._set_status(sid, "idle")
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Could not reset busy sessions — {exc}")
             try:
                 await asyncio.to_thread(revoke_assistant_keys)
             except Exception as exc:  # noqa: BLE001 — never fail the teardown
@@ -817,13 +823,14 @@ class AiAssistantService:
                 await self._set_status(sid, "idle")
 
     async def _abandon(self, session_id: str, text_parts: list[str]) -> None:
-        """The recorder is being cancelled: keep the text streamed so far and never leave
-        the row "running" for good (a live turn is re-attached by the next incarnation)."""
+        """The recorder is being cancelled: keep the text streamed so far. The row keeps its
+        status on purpose — the next incarnation's ``_reattach_recorders`` looks for rows
+        still "running"/"waiting_approval" and either follows the turn again or frees the
+        row; marking it idle here hid the turn from it (review of AI-10)."""
         try:
             text = "".join(text_parts).strip()
             if text:
                 await self._store(session_id, "assistant", "text", text[:TRANSCRIPT_MAX_CHARS * 4], None)
-            await self._set_status(session_id, "idle")
         except Exception as exc:  # noqa: BLE001
             log.warning(f"Recorder for {session_id[:8]}: could not save the interrupted turn — {exc}")
 
