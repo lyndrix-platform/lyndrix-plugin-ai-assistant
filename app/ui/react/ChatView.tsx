@@ -252,6 +252,7 @@ export default function ChatView({ compact = false }: { compact?: boolean }) {
           autoFocus={!compact}
           permissionMode={current?.permission_mode ?? status?.permission_mode ?? null}
           isAdmin={access.isAdmin}
+          allowedModes={status?.caller?.permission_modes ?? null}
           onChangeMode={canWriteCurrent ? async (mode) => {
             try {
               await assistantApi.setPermissionMode(selectedId, mode)

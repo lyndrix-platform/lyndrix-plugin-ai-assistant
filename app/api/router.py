@@ -17,7 +17,7 @@ from core.api import ApiIdentity, require_permission
 
 from ..logic.access import ASSISTANT_USERNAME
 from ..logic.bridge import BridgeError
-from ..logic.service import PERMISSION_MODES, ai_service
+from ..logic.service import PERMISSION_MODES, SAFE_MODES, ai_service
 
 PLUGIN_ID = "lyndrix.plugin.ai_assistant"
 PERM_READ = f"plugin:{PLUGIN_ID}:api:read"
@@ -29,6 +29,8 @@ PERM_ADMIN = f"plugin:{PLUGIN_ID}:api:admin"
 # own account reads the operator-allowed Vault spaces.
 PERM_CHAT = f"plugin:{PLUGIN_ID}:chat"
 PERM_VAULT = f"plugin:{PLUGIN_ID}:agent_vault"
+# Approval mode "auto" lets unmatched tool calls run without a human (AI-02).
+PERM_AUTO = f"plugin:{PLUGIN_ID}:auto_mode"
 
 
 class SessionCreate(BaseModel):
@@ -72,6 +74,17 @@ def _is_admin(identity: ApiIdentity) -> bool:
     return identity.allows(PERM_ADMIN) and not _is_agent_account(identity)
 
 
+def _allowed_modes(identity: ApiIdentity) -> tuple[str, ...]:
+    """Approval modes this caller may start or switch a session to (AI-02): everyone with
+    chat the safe ones, ``auto`` with ``auto_mode``, ``bypassPermissions`` plugin admins."""
+    allowed = set(SAFE_MODES)
+    if identity.allows(PERM_AUTO):
+        allowed.add("auto")
+    if _is_admin(identity):
+        allowed.add("bypassPermissions")
+    return tuple(m for m in PERMISSION_MODES if m in allowed)
+
+
 def require_human(permission: str):
     """``require_permission`` that also refuses the assistant's own account: the agent
     must not manage its runner/login or start and approve chat sessions itself."""
@@ -110,8 +123,15 @@ def build_router() -> APIRouter:
     # ------------------------------------------------------------------ status
 
     @router.get("/status")
-    async def status(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
-        return await ai_service.status()
+    async def status(identity: ApiIdentity = Depends(require_permission(PERM_READ))):
+        out = await ai_service.status()
+        # What this caller may do — display hygiene for the UI, the routes enforce it.
+        out["caller"] = {
+            "can_chat": identity.allows(PERM_CHAT) and not _is_agent_account(identity),
+            "is_admin": _is_admin(identity),
+            "permission_modes": list(_allowed_modes(identity)),
+        }
+        return out
 
     @router.get("/instructions")
     async def instructions(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
@@ -219,8 +239,14 @@ def build_router() -> APIRouter:
         _require_runner()
         if payload.permission_mode and payload.permission_mode not in PERMISSION_MODES:
             raise HTTPException(status_code=422, detail=f"permission_mode must be one of {PERMISSION_MODES}")
+        allowed = _allowed_modes(identity)
+        if payload.permission_mode and payload.permission_mode not in allowed:
+            raise HTTPException(status_code=403, detail=f"permission mode '{payload.permission_mode}' is not available to you")
         try:
-            return await ai_service.create_session(identity.username, payload.title, payload.permission_mode)
+            return await ai_service.create_session(identity.username, payload.title, payload.permission_mode,
+                                                   allowed_modes=allowed)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
 
@@ -242,7 +268,8 @@ def build_router() -> APIRouter:
         _require_runner()
         await asyncio.to_thread(_owned, session_id, identity)
         try:
-            return await ai_service.send_message(session_id, identity.username, payload.content)
+            return await ai_service.send_message(session_id, identity.username, payload.content,
+                                                 allowed_modes=_allowed_modes(identity))
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
         except ValueError as exc:
@@ -286,13 +313,20 @@ def build_router() -> APIRouter:
     async def set_permission_mode(session_id: str, payload: PermissionModeIn,
                                   identity: ApiIdentity = Depends(require_human(PERM_CHAT))):
         """Per-session approval switch. ``auto`` allows everything the guardrails do not
-        deny/ask; ``bypassPermissions`` also disables the guardrails and is admin-only."""
+        deny/ask (permission ``auto_mode``); ``bypassPermissions`` also disables the
+        guardrails and is admin-only."""
         _require_runner()
         await asyncio.to_thread(_owned, session_id, identity)
+        allowed = _allowed_modes(identity)
         if payload.permission_mode == "bypassPermissions" and not _is_admin(identity):
             raise HTTPException(status_code=403, detail="bypassPermissions disables the guardrails — administrators only")
+        if payload.permission_mode not in allowed:
+            raise HTTPException(status_code=403, detail=f"permission mode '{payload.permission_mode}' needs the auto_mode permission")
         try:
-            return await ai_service.set_permission_mode(session_id, identity.username, payload.permission_mode)
+            return await ai_service.set_permission_mode(session_id, identity.username, payload.permission_mode,
+                                                        allowed_modes=allowed)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
         except ValueError as exc:

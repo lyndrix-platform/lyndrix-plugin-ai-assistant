@@ -62,7 +62,10 @@ class _FakeBridge:
             from ai_plugin.app.logic.bridge import BridgeError
 
             raise BridgeError(404, "unknown session")
-        return {"session_id": sid, "last_seq": self.last_seq.get(sid, 0)}
+        live = {"session_id": sid, "last_seq": self.last_seq.get(sid, 0)}
+        if sid in getattr(self, "live_modes", {}):
+            live["permission_mode"] = self.live_modes[sid]
+        return live
 
     async def iter_events(self, sid, after=0):
         for ev in self.events.get(sid, []):
@@ -213,16 +216,74 @@ def test_permission_mode_switch_updates_bridge_and_row(db):
 
     async def run():
         s = await svc.create_session("marvin", "Modes")
-        await svc.set_permission_mode(s["id"], "marvin", "auto")
+        await svc.set_permission_mode(s["id"], "marvin", "auto", allowed_modes=service_mod.PERMISSION_MODES)
         try:
             await svc.set_permission_mode(s["id"], "marvin", "yolo")
         except ValueError:
             pass
         else:
             raise AssertionError("invalid mode accepted")
+        with pytest.raises(PermissionError):           # AI-02: the service enforces it too
+            await svc.set_permission_mode(s["id"], "marvin", "bypassPermissions")
         return s["id"]
 
     sid = asyncio.run(run())
     assert bridge.modes == [(sid, "auto")]
     with db() as s:
         assert s.get(AiSession, sid).permission_mode == "auto"
+
+
+def test_modes_the_caller_may_not_use_never_reach_the_bridge(db):
+    """AI-02: an operator default of bypassPermissions, an explicit request, a stored row
+    and a live session all end in a mode the caller may use."""
+    bridge = _FakeBridge()
+    svc = _svc(_Ctx({"permission_mode": "bypassPermissions", "max_turns": "lots"}), bridge)
+    admin_modes = service_mod.PERMISSION_MODES
+
+    async def run():
+        user = await svc.create_session("alice", "x")                       # default applies to admins only
+        admin = await svc.create_session("root", "y", allowed_modes=admin_modes)
+        assert user["permission_mode"] == "default" and admin["permission_mode"] == "bypassPermissions"
+        assert [c["permission_mode"] for c in bridge.created] == ["default", "bypassPermissions"]
+        assert "max_turns" not in bridge.created[0]                         # "lots" → ignored, not a 500
+        with pytest.raises(PermissionError):
+            await svc.create_session("alice", "z", "auto")
+        with pytest.raises(PermissionError):
+            await svc.create_session("alice", "z", "bypassPermissions")
+
+        # a row stored in bypass (created through the old hole) and the runner restarted
+        with db() as s:
+            s.get(AiSession, user["id"]).permission_mode = "bypassPermissions"
+            s.commit()
+        bridge.lost.add(user["id"])
+        bridge.events[user["id"]] = [{"seq": 1, "type": "result", "data": {"subtype": "success"}}]
+        await svc.send_message(user["id"], "alice", "hello")
+        await asyncio.wait_for(svc._recorders[user["id"]], 5)
+        assert bridge.created[-1]["permission_mode"] == "default" and bridge.created[-1]["user"] == "alice"
+
+        # a live session still in auto (the caller lost auto_mode since)
+        bridge.lost.discard(user["id"])
+        bridge.live_modes = {user["id"]: "auto"}
+        bridge.events[user["id"]] = []
+        await svc.send_message(user["id"], "alice", "again")
+        assert bridge.modes[-1] == (user["id"], "default")
+        return user["id"]
+
+    sid = asyncio.run(run())
+    with db() as s:
+        assert s.get(AiSession, sid).permission_mode == "default"
+
+
+def test_recreated_session_keeps_its_owner_when_an_admin_writes(db):
+    bridge = _FakeBridge()
+    svc = _svc(_Ctx({}), bridge)
+
+    async def run():
+        s = await svc.create_session("alice", "x")
+        bridge.lost.add(s["id"])
+        bridge.events[s["id"]] = []
+        await svc.send_message(s["id"], "root", "admin helping out", allowed_modes=service_mod.PERMISSION_MODES)
+        return s["id"]
+
+    asyncio.run(run())
+    assert bridge.created[-1]["user"] == "alice"

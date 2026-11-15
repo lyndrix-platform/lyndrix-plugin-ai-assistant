@@ -26,6 +26,7 @@ IDENTITIES = {
     "baseline_user": ("bob", {"api:read", "api:write"}),
     # the plugin roles
     "chatter": ("alice", {READ, WRITE, CHAT}),
+    "power": ("paula", {READ, WRITE, CHAT, AUTO}),
     "admin": ("root-admin", {READ, WRITE, ADMIN, CHAT, VAULT, AUTO}),
     # the assistant's own account — even when an operator grants it plugin admin
     "bot": ("ai-assistant", {READ, VAULT, ADMIN, CHAT, AUTO}),
@@ -119,6 +120,9 @@ class _FakeService:
 
     def setting(self, key, default=None):
         return default
+
+    async def status(self):
+        return {"permission_mode": "default"}
 
     def start_login_finisher(self, auth_id, by):
         self.calls.append(("login", auth_id, by))
@@ -218,8 +222,48 @@ def test_manifest_roles_match_the_route_permissions():
     roles = {r.id if hasattr(r, "id") else r["id"]: set(r.permissions if hasattr(r, "permissions") else r["permissions"])
              for r in manifest.roles}
     custom = {c.id if hasattr(c, "id") else c["id"] for c in manifest.custom_permissions}
-    assert {"api:admin", "chat", "agent_vault"} <= custom
+    assert {"api:admin", "chat", "agent_vault", "auto_mode"} <= custom
     assert CHAT in roles["user"] and ADMIN not in roles["user"]
     assert roles["agent"] == {READ, VAULT}                 # never api:admin, never chat
-    assert {ADMIN, CHAT, VAULT} <= roles["admin"]
+    assert {ADMIN, CHAT, VAULT, AUTO} <= roles["admin"]
+    assert AUTO in roles["power_user"] and AUTO not in roles["user"] and ADMIN not in roles["power_user"]
     assert CHAT not in roles["viewer"]
+
+
+@pytest.mark.parametrize("who,mode,expected", [
+    ("chatter", "default", 201), ("chatter", "acceptEdits", 201), ("chatter", "plan", 201),
+    ("chatter", "auto", 403), ("chatter", "bypassPermissions", 403),
+    ("power", "auto", 201), ("power", "bypassPermissions", 403),
+    ("admin", "auto", 201), ("admin", "bypassPermissions", 201),
+])
+def test_session_start_mode_is_checked_at_create(client, svc, who, mode, expected):
+    """AI-02: bypassPermissions used to be admin-only on switch but not on create."""
+    res = call(client, who, "POST", "/sessions", {"permission_mode": mode})
+    assert res.status_code == expected, res.text
+    if expected == 201:
+        allowed = svc.calls[-1][3]["allowed_modes"]
+        assert mode in allowed and ("bypassPermissions" in allowed) == (who == "admin")
+
+
+@pytest.mark.parametrize("who,mode,expected", [
+    ("chatter", "auto", 403), ("chatter", "bypassPermissions", 403), ("chatter", "acceptEdits", 200),
+    ("power", "auto", 200), ("power", "bypassPermissions", 403), ("admin", "bypassPermissions", 200),
+])
+def test_mode_switch_is_checked(client, svc, who, mode, expected):
+    sid = "s-alice" if who in ("chatter", "admin") else "s-paula"
+    svc.rows["s-paula"] = {"id": "s-paula", "owner": "paula", "permission_mode": "default"}
+    assert call(client, who, "POST", f"/sessions/{sid}/permission-mode", {"permission_mode": mode}).status_code == expected
+
+
+def test_messages_carry_the_callers_modes_to_the_service(client, svc):
+    call(client, "chatter", "POST", "/sessions/s-alice/messages", {"content": "hi"})
+    assert svc.calls[-1][0] == "send" and svc.calls[-1][3]["allowed_modes"] == ("default", "acceptEdits", "plan")
+
+
+def test_status_tells_the_ui_what_the_caller_may_do(client):
+    assert call(client, "baseline_user", "GET", "/status").json()["caller"] == {
+        "can_chat": False, "is_admin": False, "permission_modes": ["default", "acceptEdits", "plan"]}
+    assert call(client, "admin", "GET", "/status").json()["caller"]["permission_modes"] == [
+        "default", "acceptEdits", "plan", "auto", "bypassPermissions"]
+    bot = call(client, "bot", "GET", "/status").json()["caller"]
+    assert bot["can_chat"] is False and bot["is_admin"] is False

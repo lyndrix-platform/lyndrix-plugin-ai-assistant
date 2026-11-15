@@ -38,8 +38,9 @@ export interface WorkspaceStatus {
   initialized?: boolean
   remote?: string | null
   branch?: string | null
-  dirty_files?: number
+  dirty_files?: number | null
   has_instructions?: boolean
+  update_pending?: boolean
   last_sync?: string | null
   last_error?: string | null
 }
@@ -54,6 +55,8 @@ export interface AssistantStatus {
   db_ready: boolean
   permission_mode: string
   model: string | null
+  /** What the calling user may do (display only; the API enforces it). */
+  caller?: { can_chat: boolean; is_admin: boolean; permission_modes: string[] }
 }
 
 export type SessionStatus = 'idle' | 'running' | 'waiting_approval' | 'closed'

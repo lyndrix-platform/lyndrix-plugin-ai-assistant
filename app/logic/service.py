@@ -11,7 +11,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from sqlalchemy import select
 
@@ -31,6 +31,10 @@ PROVIDERS = ("claude-code",)           # "hermes" follows once the Hermes provid
 # "auto" = the bridge allows every call the guardrails do not deny or flag "ask";
 # unlike bypassPermissions it keeps the deny/ask rules in force.
 PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "bypassPermissions")
+# Modes every chat user may pick. "auto" (no human in the loop for unmatched calls)
+# needs the permission auto_mode, "bypassPermissions" (no guardrails at all) plugin
+# admin — the router computes the caller's set, the service enforces it (AI-02).
+SAFE_MODES = ("default", "acceptEdits", "plan")
 DEFAULT_IMAGE = "ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest"
 TRANSCRIPT_MAX_CHARS = 6000
 
@@ -416,19 +420,42 @@ class AiAssistantService:
             for r in reversed(rows)
         ]
 
+    def _start_mode(self, requested: Optional[str], allowed_modes: Iterable[str]) -> str:
+        """The mode a session starts (or restarts) in. An explicit request the caller may
+        not use is refused; the operator default only applies when the caller may use it
+        — a default of auto/bypassPermissions must not hand those modes to everyone."""
+        allowed = set(allowed_modes)
+        if requested:
+            if requested not in PERMISSION_MODES:
+                raise ValueError(f"permission_mode must be one of {PERMISSION_MODES}")
+            if requested not in allowed:
+                raise PermissionError(f"permission mode '{requested}' is not available to you")
+            return requested
+        default = str(self.setting("permission_mode", "default"))
+        return default if default in allowed and default in PERMISSION_MODES else "default"
+
+    def _max_turns(self) -> Optional[int]:
+        """``max_turns`` setting; an unusable value means "no limit from us" instead of a 500."""
+        raw = self.setting("max_turns")
+        try:
+            value = int(str(raw).strip()) if raw not in (None, "") else None
+        except ValueError:
+            log.warning(f"Setting max_turns={raw!r} is not a number — ignored.")
+            return None
+        return value if value and 1 <= value <= 1000 else None
+
     async def create_session(self, owner: str, title: Optional[str] = None,
-                             permission_mode: Optional[str] = None) -> dict:
-        mode = permission_mode or str(self.setting("permission_mode", "default"))
-        if mode not in PERMISSION_MODES:
-            mode = "default"
+                             permission_mode: Optional[str] = None, *,
+                             allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
+        mode = self._start_mode(permission_mode, allowed_modes)
         payload = {
             "user": owner, "title": title or "Neue Unterhaltung", "cwd": "/workspace",
             "permission_mode": mode, "model": self.setting("model") or None,
             "policy": self.guardrail_policy(),
         }
-        max_turns = self.setting("max_turns")
+        max_turns = self._max_turns()
         if max_turns:
-            payload["max_turns"] = int(max_turns)
+            payload["max_turns"] = max_turns
         created = await self.bridge().create_session(payload)
         sid = str(created.get("session_id") or uuid.uuid4())
         now = _utcnow()
@@ -444,7 +471,8 @@ class AiAssistantService:
             await asyncio.to_thread(retry_write, _insert)
         return self.get_session(sid) or {"id": sid, "owner": owner, "title": payload["title"], "status": "idle"}
 
-    async def send_message(self, session_id: str, owner: str, content: str) -> dict:
+    async def send_message(self, session_id: str, owner: str, content: str, *,
+                           allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
         content = (content or "").strip()
         if not content:
             raise ValueError("empty message")
@@ -463,16 +491,22 @@ class AiAssistantService:
 
         if self.is_ready:
             await asyncio.to_thread(retry_write, _record_user)
-        await self._ensure_bridge_session(session_id, owner)
+        await self._ensure_bridge_session(session_id, owner, allowed_modes)
         result = await self.bridge().send_message(session_id, content)
         self._start_recorder(session_id)
         return result or {"accepted": True}
 
-    async def _ensure_bridge_session(self, session_id: str, owner: str) -> None:
+    async def _ensure_bridge_session(self, session_id: str, owner: str,
+                                     allowed_modes: Iterable[str] = SAFE_MODES) -> None:
         """The bridge keeps sessions in memory: after a runner restart (or a core
         restart) the DB row exists but the bridge has never heard of it. Recreate
         it under the same id, resuming the Claude conversation when we know it,
-        and align the recorder's event cursor so old events are not re-recorded."""
+        and align the recorder's event cursor so old events are not re-recorded.
+
+        A session never runs in a mode the caller may not use (AI-02): a stored or live
+        auto/bypassPermissions mode — e.g. from before this check existed, or the caller
+        lost the right since — is reset to ``default``."""
+        allowed = set(allowed_modes)
         bridge = self.bridge()
         try:
             live = await bridge.get_session(session_id)
@@ -480,33 +514,57 @@ class AiAssistantService:
             if exc.status != 404:
                 raise
             row = self.get_session(session_id) or {}
-            mode = row.get("permission_mode") or str(self.setting("permission_mode", "default"))
+            mode = row.get("permission_mode") or "default"
+            if mode not in allowed or mode not in PERMISSION_MODES:
+                await self._downgrade_mode(session_id, mode, live=False)
+                mode = "default"
             payload = {
-                "session_id": session_id, "user": owner, "title": row.get("title") or "Unterhaltung",
-                "cwd": "/workspace", "permission_mode": mode if mode in PERMISSION_MODES else "default",
+                "session_id": session_id, "user": row.get("owner") or owner, "title": row.get("title") or "Unterhaltung",
+                "cwd": "/workspace", "permission_mode": mode,
                 "model": self.setting("model") or None, "policy": self.guardrail_policy(),
                 "resume": row.get("claude_session_id") or None,
             }
-            max_turns = self.setting("max_turns")
+            max_turns = self._max_turns()
             if max_turns:
-                payload["max_turns"] = int(max_turns)
+                payload["max_turns"] = max_turns
             await bridge.create_session(payload)
             self._seqs.pop(session_id, None)
             log.info(f"Recreated bridge session {session_id[:8]} (resume={'yes' if payload['resume'] else 'no'})")
             return
+        live_mode = (live or {}).get("permission_mode")
+        if live_mode and live_mode not in allowed:
+            await self._downgrade_mode(session_id, str(live_mode), live=True)
         if session_id not in self._seqs:
             self._seqs[session_id] = int((live or {}).get("last_seq") or 0)
+
+    async def _downgrade_mode(self, session_id: str, mode: str, *, live: bool) -> None:
+        log.warning(f"Session {session_id[:8]}: mode '{mode}' is not available to the caller — reset to 'default'.")
+        if live:
+            await self.bridge().set_permission_mode(session_id, "default")
+
+        def _tx():
+            with get_session() as s:
+                row = s.get(AiSession, session_id)
+                if row is not None:
+                    row.permission_mode = "default"
+                    s.commit()
+
+        if self.is_ready:
+            await asyncio.to_thread(retry_write, _tx)
 
     async def approve(self, session_id: str, approval_id: str, decision: str,
                       updated_input: dict | None = None, message: str | None = None) -> dict:
         res = await self.bridge().approve(session_id, approval_id, decision, updated_input, message)
         return res or {"ok": True}
 
-    async def set_permission_mode(self, session_id: str, owner: str, mode: str) -> dict:
+    async def set_permission_mode(self, session_id: str, owner: str, mode: str, *,
+                                  allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
         """Switch a session's approval mode (bridge + DB row)."""
         if mode not in PERMISSION_MODES:
             raise ValueError(f"permission_mode must be one of {PERMISSION_MODES}")
-        await self._ensure_bridge_session(session_id, owner)
+        if mode not in set(allowed_modes):
+            raise PermissionError(f"permission mode '{mode}' is not available to you")
+        await self._ensure_bridge_session(session_id, owner, allowed_modes)
         res = await self.bridge().set_permission_mode(session_id, mode)
 
         def _tx():

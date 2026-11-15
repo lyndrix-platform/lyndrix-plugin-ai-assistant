@@ -15,7 +15,7 @@ const MODES: { id: string; icon: string; labelKey: string; label: string; hintKe
   { id: 'bypassPermissions', icon: 'warning_amber', labelKey: 'composer.mode.bypass', label: 'Bypass', hintKey: 'composer.modeHint.bypass', hint: 'Allows everything and disables the guardrails — administrators only.', admin: true },
 ]
 
-export default function Composer({ phase, disabled, disabledHint, onSend, onInterrupt, compact, autoFocus, permissionMode, onChangeMode, isAdmin }: {
+export default function Composer({ phase, disabled, disabledHint, onSend, onInterrupt, compact, autoFocus, permissionMode, onChangeMode, isAdmin, allowedModes }: {
   phase: Phase
   /** No session / no permission / runner down — the textarea is locked. */
   disabled: boolean
@@ -28,6 +28,8 @@ export default function Composer({ phase, disabled, disabledHint, onSend, onInte
   permissionMode?: string | null
   onChangeMode?: (mode: string) => Promise<void> | void
   isAdmin?: boolean
+  /** Modes the server allows this user (status.caller); `auto` needs the auto_mode permission. */
+  allowedModes?: string[] | null
 }) {
   const { t } = useTranslation('ai_assistant')
   const [text, setText] = useState('')
@@ -38,7 +40,7 @@ export default function Composer({ phase, disabled, disabledHint, onSend, onInte
     setSwitching(mode)
     try { await onChangeMode(mode) } finally { setSwitching(null) }
   }
-  const modes = MODES.filter((m) => !m.admin || isAdmin || m.id === permissionMode)
+  const modes = MODES.filter((m) => m.id === permissionMode || (allowedModes ? allowedModes.includes(m.id) : (!m.admin || isAdmin)))
   const ref = useRef<HTMLTextAreaElement>(null)
   const running = phase === 'running' || phase === 'waiting_approval'
   const locked = disabled || running || phase === 'closed'

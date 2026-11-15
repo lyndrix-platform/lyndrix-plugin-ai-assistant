@@ -69,6 +69,9 @@ manifest = ModuleManifest(
                         "shared runner container, which also holds the Claude credential — grant only to trusted users."},
         {"id": "agent_vault", "label": "Read the agent's Vault spaces",
          "description": "Values of the Vault spaces listed in the setting vault_spaces (the assistant's own account)."},
+        {"id": "auto_mode", "label": "Use the Auto approval mode",
+         "description": "Sessions in Auto run every tool call the deny/ask guardrails do not stop — without a human "
+                        "in the loop, so prompt injection (web pages, tool output) acts unchecked."},
     ],
     roles=[
         {"id": "viewer", "label": "AI Assistant Viewer",
@@ -78,6 +81,10 @@ manifest = ModuleManifest(
          "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
                          "plugin:lyndrix.plugin.ai_assistant:chat"],
          "auto_map_groups": [], "description": "Chat with the assistant and approve its tool calls."},
+        {"id": "power_user", "label": "AI Assistant Power User",
+         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
+                         "plugin:lyndrix.plugin.ai_assistant:chat", "plugin:lyndrix.plugin.ai_assistant:auto_mode"],
+         "auto_map_groups": [], "description": "Like User, plus the Auto approval mode."},
         {"id": "agent", "label": "AI Assistant Agent",
          "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:agent_vault"],
          "auto_map_groups": [], "description": "The assistant's own account: read status and the allowed Vault spaces. "
@@ -85,7 +92,7 @@ manifest = ModuleManifest(
         {"id": "admin", "label": "AI Assistant Administrator",
          "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
                          "plugin:lyndrix.plugin.ai_assistant:api:admin", "plugin:lyndrix.plugin.ai_assistant:chat",
-                         "plugin:lyndrix.plugin.ai_assistant:agent_vault"],
+                         "plugin:lyndrix.plugin.ai_assistant:agent_vault", "plugin:lyndrix.plugin.ai_assistant:auto_mode"],
          "auto_map_groups": ["INT_ADMIN"], "description": "Full control: login, runner, workspace, guardrails."},
     ],
     settings_schema=[
@@ -115,7 +122,7 @@ manifest = ModuleManifest(
          "description": "Operator notes appended to the generated CLAUDE.md (Markdown; use ';' for line breaks)."},
         {"key": "permission_mode", "label": "Tool approval mode", "kind": "select",
          "options": ["default", "acceptEdits", "plan", "auto", "bypassPermissions"], "default": "default", "category": "Guardrails",
-         "description": "Start mode of new sessions (switchable per session in the chat): default asks for every tool; acceptEdits allows file edits in the workspace; plan never mutates; auto allows everything the deny/ask rules do not stop; bypassPermissions allows everything incl. the guardrails (admins only)."},
+         "description": "Start mode of new sessions (switchable per session in the chat): default asks for every tool; acceptEdits allows file edits in the workspace; plan never mutates; auto allows everything the deny/ask rules do not stop (needs the auto_mode permission); bypassPermissions allows everything incl. the guardrails (admins only). A default the user may not use starts the session in default."},
         {"key": "guardrails_allow", "label": "Always allow", "kind": "str", "category": "Guardrails",
          "description": "Rules 'Tool' or 'Tool: regex' separated by ';' that run without asking, e.g. 'Read; Grep; Glob; Bash: ^git (status|log|diff)'."},
         {"key": "guardrails_ask", "label": "Always ask", "kind": "str", "category": "Guardrails",
