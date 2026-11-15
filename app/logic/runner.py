@@ -258,6 +258,26 @@ class RunnerManager:
         if state is not None:
             await asyncio.to_thread(_docker, "stop", "-t", "10", CONTAINER_NAME, timeout=40)
 
+    async def remove(self) -> bool:
+        """Remove the runner container of this Docker host (and with it the credentials in
+        its env and the bridge's in-memory sessions). The home volume (transcripts for
+        ``resume``) stays. ``False`` when there was nothing to remove or no Docker here."""
+        self.client = None
+        self._fingerprint = None
+        try:
+            state = await asyncio.to_thread(self.container_state)
+            if state is None:
+                return False
+            res = await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME, timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(f"Runner: could not remove {CONTAINER_NAME} — {exc}")
+            return False
+        if res.returncode != 0:
+            log.warning(f"Runner: docker rm {CONTAINER_NAME} failed — {(res.stderr or '').strip()[:200]}")
+            return False
+        log.info(f"Runner: removed {CONTAINER_NAME}.")
+        return True
+
     async def logs(self, tail: int = 200) -> str:
         res = await asyncio.to_thread(_docker, "logs", "--tail", str(tail), CONTAINER_NAME, timeout=20)
         return (res.stdout or "") + (res.stderr or "")

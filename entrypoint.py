@@ -216,6 +216,21 @@ async def health(ctx) -> PluginHealthStatus:
     return PluginHealthStatus(status="ok", details=details, latency_ms=latency)
 
 
-def teardown(ctx):
+def _being_disabled() -> bool:
+    """Core 1.11 sets the registry status to ``disabled`` before it calls teardown on
+    disable; reload/upgrade/uninstall unload with the status unchanged."""
+    try:
+        from core.api import module_registry  # type: ignore[attr-defined]
+
+        status_of = getattr(module_registry, "status", None)
+        return callable(status_of) and status_of(PLUGIN_ID) == "disabled"
+    except Exception:  # noqa: BLE001 — older cores: treat as a reload (keep the runner)
+        return False
+
+
+async def teardown(ctx):
     plugin_state["ready"] = False
-    ctx.log.info("KI-Assistent: teardown complete (runner container keeps running).")
+    disabling = _being_disabled()
+    await ai_service.shutdown(disabling=disabling)
+    ctx.log.info("KI-Assistent: teardown complete "
+                 + ("(disabled: runner removed, agent keys revoked)." if disabling else "(runner container keeps running)."))

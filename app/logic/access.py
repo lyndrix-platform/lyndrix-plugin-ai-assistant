@@ -87,6 +87,21 @@ def issue_api_key() -> str:
     return raw
 
 
+def revoke_assistant_keys() -> int:
+    """Revoke every live key this plugin issued to the assistant account (plugin
+    disabled: nothing may keep acting as the agent). Idempotent; blocking."""
+    from core.components.auth.logic.api_key_service import api_key_service
+
+    revoked = 0
+    for info in api_key_service.list_for_user(ASSISTANT_USERNAME):
+        if getattr(info, "label", "") == API_KEY_LABEL and not getattr(info, "revoked", False):
+            if api_key_service.revoke(info.id, ASSISTANT_USERNAME):
+                revoked += 1
+    if revoked:
+        log.info(f"Revoked {revoked} API key(s) of '{ASSISTANT_USERNAME}'.")
+    return revoked
+
+
 def parse_vault_spaces(raw: Optional[str]) -> list[str]:
     """``"plugins/a, plugins/b"`` → ``["plugins/a", "plugins/b"]`` (no traversal, no empties)."""
     out: list[str] = []

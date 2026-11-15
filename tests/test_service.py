@@ -340,3 +340,155 @@ def test_no_blocking_db_read_on_the_event_loop(db):
 
     asyncio.run(run())
     assert on_loop == []
+
+
+class _SlowBridge(_FakeBridge):
+    """A turn that streams some text and then keeps running (never ends by itself)."""
+
+    def __init__(self):
+        super().__init__()
+        self.live_status = {}
+        self.forever = asyncio.Event()
+
+    async def get_session(self, sid):
+        live = await super().get_session(sid)
+        live["status"] = self.live_status.get(sid, "idle")
+        return live
+
+    async def iter_events(self, sid, after=0):
+        for ev in self.events.get(sid, []):
+            if ev["seq"] > after:
+                yield ev
+        await self.forever.wait()
+
+
+def test_a_cancelled_recorder_keeps_the_text_and_never_leaves_the_row_running(db):
+    """AI-10: plugin reload/disable cancels the recorder (CancelledError is no Exception)."""
+    bridge = _SlowBridge()
+    svc = _svc(_Ctx({}), bridge)
+
+    async def run():
+        s = await svc.create_session("alice", "x")
+        bridge.events[s["id"]] = [
+            {"seq": 1, "type": "status", "data": {"state": "running"}},
+            {"seq": 2, "type": "assistant_text", "data": {"text": "Half an ", "delta": True}},
+            {"seq": 3, "type": "assistant_text", "data": {"text": "answer", "delta": True}},
+        ]
+        await svc.send_message(s["id"], "alice", "go")
+        task = svc._recorders[s["id"]]
+        for _ in range(100):
+            if svc._last_seq(s["id"]) == 3:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()                                       # what ctx.dispose() does
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return s["id"]
+
+    sid = asyncio.run(run())
+    with db() as s:
+        assert s.get(AiSession, sid).status == "idle"
+        texts = [m.content for m in s.query(AiMessage).filter(AiMessage.session_id == sid, AiMessage.role == "assistant")]
+    assert texts == ["Half an answer"]
+
+
+def test_the_next_incarnation_reattaches_to_running_turns_and_frees_dead_ones(db):
+    bridge = _SlowBridge()
+    svc = _svc(_Ctx({}), bridge)
+
+    class _Runner:
+        client = object()
+
+    svc.runner = _Runner()
+
+    async def run():
+        live = await svc.create_session("alice", "live")
+        dead = await svc.create_session("bob", "dead")
+        with db() as s:
+            for sid in (live["id"], dead["id"]):
+                s.get(AiSession, sid).status = "running"
+            s.commit()
+        bridge.live_status[live["id"]] = "running"
+        bridge.last_seq[live["id"]] = 7                          # where the bridge is now
+        bridge.events[live["id"]] = [
+            {"seq": 6, "type": "assistant_text", "data": {"text": "old, skipped", "delta": True}},
+            {"seq": 8, "type": "assistant_text", "data": {"text": "The rest.", "delta": False}},
+            {"seq": 9, "type": "status", "data": {"state": "idle"}},  # turn ends (no result event)
+        ]
+        await svc._reattach_recorders()
+        await asyncio.wait_for(svc._recorders[live["id"]], 5)
+        return live["id"], dead["id"]
+
+    live, dead = asyncio.run(run())
+    with db() as s:
+        assert s.get(AiSession, dead).status == "idle"           # bridge forgot it → freed
+        row = s.get(AiSession, live)
+        assert row.status == "idle" and row.turns == 1
+        texts = [m.content for m in s.query(AiMessage).filter(AiMessage.session_id == live, AiMessage.role == "assistant")]
+    assert texts == ["The rest."]
+
+
+def test_disable_removes_the_runner_and_revokes_the_agent_keys(db, monkeypatch):
+    """AI-10: a disabled plugin left the credentialed runner and a valid bot key behind."""
+    calls = []
+
+    class _Runner:
+        client = object()
+
+        async def remove(self):
+            calls.append("rm")
+            return True
+
+    monkeypatch.setattr(service_mod, "revoke_assistant_keys", lambda: calls.append("revoke") or 1)
+    ctx = _Ctx({})
+    ctx.secrets["assistant_api_key"] = "dummy-key-not-real"
+    svc = _svc(ctx, _FakeBridge())
+    svc.runner = _Runner()
+
+    asyncio.run(svc.shutdown(disabling=False))                  # reload/upgrade: runner stays
+    assert calls == [] and ctx.secrets["assistant_api_key"] == "dummy-key-not-real"
+    asyncio.run(svc.shutdown(disabling=True))
+    assert calls == ["rm", "revoke"] and ctx.secrets["assistant_api_key"] == ""
+    assert svc.is_runner_host is False
+
+
+def test_teardown_tells_disable_from_reload(monkeypatch):
+    from core.api import module_registry
+
+    from ai_plugin import entrypoint
+
+    seen = []
+
+    async def fake_shutdown(*, disabling):
+        seen.append(disabling)
+
+    monkeypatch.setattr(entrypoint.ai_service, "shutdown", fake_shutdown)
+
+    class _Log:
+        def info(self, msg):
+            pass
+
+    class _C:
+        log = _Log()
+
+    for status, expected in (("disabled", True), ("active", False), (None, False)):
+        monkeypatch.setattr(module_registry, "status", lambda pid, s=status: s, raising=False)
+        asyncio.run(entrypoint.teardown(_C()))
+        assert seen[-1] is expected
+
+
+def test_runner_remove_runs_docker_rm_only_when_there_is_a_container(monkeypatch):
+    import subprocess
+
+    from ai_plugin.app.logic import runner as runner_mod
+
+    calls = []
+    state = {"value": "running"}
+    monkeypatch.setattr(runner_mod.RunnerManager, "container_state", staticmethod(lambda: state["value"]))
+    monkeypatch.setattr(runner_mod, "_docker", lambda *a, timeout=30: calls.append(a) or subprocess.CompletedProcess(a, 0, "", ""))
+    mgr = runner_mod.RunnerManager(socket_client=None, storage_dir="/tmp")
+    mgr.client = object()
+    assert asyncio.run(mgr.remove()) is True
+    assert calls == [("rm", "-f", runner_mod.CONTAINER_NAME)] and mgr.client is None
+    state["value"] = None
+    assert asyncio.run(mgr.remove()) is False and len(calls) == 1

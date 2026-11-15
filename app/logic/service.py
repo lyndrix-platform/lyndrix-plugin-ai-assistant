@@ -19,7 +19,13 @@ from core.api import get_logger
 
 from ..model.database import db_ready, ensure_tables, get_session, retry_write
 from ..model.models import AiMessage, AiSession
-from .access import ensure_assistant_user, issue_api_key, parse_vault_spaces, read_vault_space
+from .access import (
+    ensure_assistant_user,
+    issue_api_key,
+    parse_vault_spaces,
+    read_vault_space,
+    revoke_assistant_keys,
+)
 from .bridge import BridgeClient, BridgeError
 from .instructions import collect_plugin_index, render_instructions
 from .runner import RunnerConfig, RunnerManager
@@ -320,6 +326,7 @@ class AiAssistantService:
             cfg = await self.runner_config()
             health = await self.runner.ensure(cfg, force=force)
             self._health_cache = None
+            await self._reattach_recorders()
             if self.workspace is not None and self.workspace.update_pending:
                 # a remote update fetched while no runner was up: merge it in the sandbox now
                 await asyncio.to_thread(self.workspace.apply_pending_update)
@@ -353,6 +360,36 @@ class AiAssistantService:
     async def stop_runner_role(self) -> None:
         """``on_lease`` lost: stop driving (the container keeps running for the peer)."""
         self.is_runner_host = False
+
+    async def shutdown(self, *, disabling: bool) -> None:
+        """Plugin teardown. Reload/upgrade/core shutdown: stop this incarnation's loops,
+        leave the runner running (sessions continue; the next incarnation re-attaches).
+        Disabled: no container with the operator's Claude credential and the agent's key
+        may outlive the plugin, so remove the runner of this host, revoke the agent's
+        keys and forget the stored one (a re-enable issues a fresh key) — AI-10.
+
+        TODO(agent): uninstall is indistinguishable from a reload here (core 1.11 calls
+        the same teardown); it needs a core uninstall hook. Until then: disable first."""
+        self.is_runner_host = False
+        for task in (self._watchdog, self._login_task):
+            if task is not None and not task.done():
+                task.cancel()
+        if not disabling:
+            return
+        if self.runner is not None:
+            await self.runner.remove()
+        if self.is_ready:
+            try:
+                await asyncio.to_thread(revoke_assistant_keys)
+            except Exception as exc:  # noqa: BLE001 — never fail the teardown
+                log.warning(f"Could not revoke the assistant's API keys — {exc}")
+        set_secret = getattr(self.ctx, "set_secret", None)
+        if callable(set_secret):
+            try:
+                await asyncio.to_thread(set_secret, "assistant_api_key", "")
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Could not clear the stored assistant key — {exc}")
+        log.info("KI-Assistent disabled: runner removed, agent keys revoked.")
 
     async def runner_health(self, max_age_s: float = 15.0) -> dict:
         import time
@@ -616,17 +653,64 @@ class AiAssistantService:
 
     # ------------------------------------------------------------------ recorder
 
-    def _start_recorder(self, session_id: str) -> None:
+    def _start_recorder(self, session_id: str, *, mid_turn: bool = False) -> None:
         task = self._recorders.get(session_id)
         if task and not task.done():
             return
         create = getattr(self.ctx, "create_task", None) or asyncio.create_task
-        self._recorders[session_id] = create(self._record_turn(session_id), name=f"ai:record:{session_id[:8]}")
+        self._recorders[session_id] = create(self._record_turn(session_id, mid_turn=mid_turn),
+                                             name=f"ai:record:{session_id[:8]}")
 
-    async def _record_turn(self, session_id: str) -> None:
-        """Follow the bridge events of one turn and persist the transcript."""
+    def _busy_session_ids(self) -> list[str]:
+        """Rows a recorder left "running"/"waiting_approval". Blocking."""
+        with get_session() as s:
+            q = select(AiSession.id).where(AiSession.status.in_(("running", "waiting_approval")),
+                                           AiSession.archived.is_(False))
+            return [str(sid) for sid in s.scalars(q).all()]
+
+    async def _reattach_recorders(self) -> None:
+        """A recorder dies with its plugin incarnation (reload, upgrade, core restart)
+        while the turn goes on in the runner. Follow such turns again — from the bridge's
+        current position, so the rest of the turn and the final answer are recorded —
+        and set rows idle whose turn is over or whose bridge session is gone (AI-10)."""
+        if not self.is_ready or self.runner is None or self.runner.client is None:
+            return
+        try:
+            busy = await asyncio.to_thread(self._busy_session_ids)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Recorder re-attach skipped — {exc}")
+            return
+        for sid in busy:
+            task = self._recorders.get(sid)
+            if task is not None and not task.done():
+                continue
+            try:
+                live = await self.bridge().get_session(sid)
+            except BridgeError:
+                live = None
+            if (live or {}).get("status") in ("running", "waiting_approval"):
+                self._seqs[sid] = int((live or {}).get("last_seq") or 0)
+                self._start_recorder(sid, mid_turn=True)
+                log.info(f"Recorder re-attached to the running turn of {sid[:8]}.")
+            else:
+                await self._set_status(sid, "idle")
+
+    async def _abandon(self, session_id: str, text_parts: list[str]) -> None:
+        """The recorder is being cancelled: keep the text streamed so far and never leave
+        the row "running" for good (a live turn is re-attached by the next incarnation)."""
+        try:
+            text = "".join(text_parts).strip()
+            if text:
+                await self._store(session_id, "assistant", "text", text[:TRANSCRIPT_MAX_CHARS * 4], None)
+            await self._set_status(session_id, "idle")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Recorder for {session_id[:8]}: could not save the interrupted turn — {exc}")
+
+    async def _record_turn(self, session_id: str, *, mid_turn: bool = False) -> None:
+        """Follow the bridge events of one turn and persist the transcript.
+        ``mid_turn``: attached to a turn that is already running (re-attach)."""
         text_parts: list[str] = []
-        running = False       # a turn ends with `result`, or with `status idle` after `running`
+        running = mid_turn    # a turn ends with `result`, or with `status idle` after `running`
         try:
             async for ev in self.bridge().iter_events(session_id, after=self._last_seq(session_id)):
                 kind, data = ev.get("type"), ev.get("data") or {}
@@ -666,6 +750,10 @@ class AiAssistantService:
                     return
             # stream closed by the bridge (session closed / restart) — close the turn
             await self._finish(session_id, text_parts, None)
+        except asyncio.CancelledError:
+            # dispose() on reload/disable cancels this task; CancelledError is no Exception
+            await asyncio.shield(self._abandon(session_id, text_parts))
+            raise
         except Exception as exc:  # noqa: BLE001
             log.warning(f"Recorder for {session_id[:8]} stopped: {exc}")
             await self._set_status(session_id, "idle")

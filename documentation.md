@@ -25,6 +25,14 @@ Browser ──(SSE/REST)── Core-Instanz mit Rolle `runner` ──(HTTP, X-Br
   Runner startet auch ohne Claude-Zugangsdaten — der Login läuft in ihm.
 - **Sessions**: Die Bridge hält Sessions nur im Speicher. Nach einem Neustart legt das Plugin eine
   Session beim nächsten Senden unter derselben ID neu an (`resume` mit der gemerkten Claude-Session).
+  Ein Plugin-Reload oder -Upgrade lässt den Runner laufen: Der Recorder speichert den bis dahin
+  gestreamten Text, und die nächste Inkarnation hängt sich an noch laufende Runden wieder an.
+  Sessions ohne laufende Runde werden auf `idle` gesetzt.
+- **Deaktivieren** entfernt den Runner-Container dieses Hosts (samt Zugangsdaten in seiner
+  Umgebung) und widerruft die API-Keys des Kontos `ai-assistant`. Beim Aktivieren wird ein neuer
+  Key ausgestellt. Das Volume mit den Claude-Verläufen bleibt erhalten. **Vor dem Deinstallieren
+  deaktivieren:** Der Core ruft bei Deinstallation denselben Teardown wie bei einem Reload auf,
+  und der Runner bliebe sonst stehen.
 - **Instruktionen**: Jede Session bekommt die Instruktionen als System-Prompt
   (`append_system_prompt`) direkt vom Plugin. Die CLI lädt keine Dateien aus dem Workspace
   (`setting_sources=[]`): weder `CLAUDE.md` noch `.claude/settings.json`. Der Workspace ist
