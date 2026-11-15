@@ -15,6 +15,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import stat
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 
@@ -122,6 +123,27 @@ class LocalPeerGuard:
 
 
 # -------------------------------------------------------------------- factory
+
+LEGACY_INSTRUCTIONS_MAX = 64 * 1024
+
+
+def legacy_workspace_instructions(cwd: str) -> str | None:
+    """Instructions for a plugin older than 0.4 that sends no ``append_system_prompt``.
+
+    Such plugins relied on the CLI loading ``<cwd>/CLAUDE.md``; this bridge loads no
+    workspace settings any more (AI-04), and an old plugin with the default image
+    ``:latest`` picks this bridge up on its next recreate. Read only the text (never
+    ``.claude/settings.json``), never through a symlink, bounded."""
+    try:
+        fd = os.open(os.path.join(cwd, "CLAUDE.md"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):   # a FIFO/device must not block or leak
+            return None
+        text = fh.read(LEGACY_INSTRUCTIONS_MAX).decode("utf-8", "replace").strip()
+    return text or None
+
 
 
 def create_app(
@@ -270,6 +292,12 @@ def create_app(
         if not os.path.isdir(cwd):
             raise HTTPException(status_code=400, detail=f"cwd is not a directory: {cwd}")
         policy = Policy.from_dict(body.policy.model_dump() if body.policy else None)
+        append = body.append_system_prompt
+        if append is None:
+            append = legacy_workspace_instructions(cwd)
+            if append:
+                log.info("no instructions from the plugin (< 0.4) — using the workspace CLAUDE.md text",
+                         extra={"ctx": {"user": body.user}})
         spec = SessionSpec(
             user=body.user,
             title=body.title,
@@ -277,7 +305,7 @@ def create_app(
             permission_mode=body.permission_mode,
             allowed_tools=list(body.allowed_tools),
             model=body.model,
-            append_system_prompt=body.append_system_prompt,
+            append_system_prompt=append,
             resume=body.resume,
             max_turns=body.max_turns,
         )

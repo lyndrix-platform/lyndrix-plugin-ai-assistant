@@ -21,7 +21,7 @@ from bridge.auth import AuthFlowManager
 from bridge.claude_provider import SessionSpec, build_options
 from bridge.config import Settings
 
-from .conftest import TOKEN
+from .conftest import TOKEN, wait_for
 
 ENV = {
     "LYNDRIX_AI_BRIDGE_TOKEN": "dummy-bridge-token-not-real",
@@ -172,3 +172,25 @@ async def test_a_failing_guard_denies_instead_of_waving_the_call_through():
 
     out = await pre_tool_use_hook(broken)({"tool_name": "Bash", "tool_input": {"command": "ls"}}, None, None)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+async def test_old_plugins_without_a_system_prompt_still_get_the_workspace_instructions(tmp_path, provider):
+    """An old plugin (default image :latest) picks this bridge up on its next recreate and
+    sends no append_system_prompt; only the CLAUDE.md *text* is used, never through a link."""
+    from bridge.app import legacy_workspace_instructions
+
+    (tmp_path / "CLAUDE.md").write_text("# Lyndrix AI Assistant — workspace instructions\n")
+    settings = Settings(bridge_token=TOKEN, workspace=str(tmp_path), reject_local_peers=False)
+    app = create_app(settings=settings, provider=provider, auth_flows=AuthFlowManager(None))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://bridge", headers={"X-Bridge-Token": TOKEN}) as c:
+        old = (await c.post("/sessions", json={"user": "alice"})).json()["session_id"]
+        new = (await c.post("/sessions", json={"user": "bob", "append_system_prompt": "from the plugin"})).json()["session_id"]
+        for sid in (old, new):
+            assert (await c.post(f"/sessions/{sid}/messages", json={"content": "hi"})).status_code == 202
+        await wait_for(lambda: len(provider.opened) == 2)
+    prompts = {spec.user: spec.append_system_prompt for spec in provider.opened}
+    assert prompts == {"alice": "# Lyndrix AI Assistant — workspace instructions", "bob": "from the plugin"}
+    (tmp_path / "CLAUDE.md").unlink()
+    (tmp_path / "CLAUDE.md").symlink_to("/etc/hostname")
+    assert legacy_workspace_instructions(str(tmp_path)) is None
