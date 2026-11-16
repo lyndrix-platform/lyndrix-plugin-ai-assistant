@@ -222,8 +222,9 @@ async def test_strict_mcp_config_is_passed_only_when_the_cli_knows_it(tmp_path):
 def test_the_real_sdk_passes_the_isolation_flags_to_the_cli(tmp_path):
     """Runs where the real claude-agent-sdk is installed (inside the runner image in CI);
     skipped with the stub. Guards the assumptions AI-04/AI-07 rest on: an empty
-    setting_sources list must reach the CLI as `--setting-sources ""` (a truthiness check in
-    the SDK would drop the flag and silently load the workspace settings again)."""
+    setting_sources list must reach the CLI as an explicit empty `--setting-sources` (a
+    truthiness check in the SDK would drop the flag and silently load the workspace settings
+    again)."""
     import claude_agent_sdk
 
     if getattr(claude_agent_sdk, "__version__", "").endswith("-stub"):
@@ -243,5 +244,12 @@ def test_the_real_sdk_passes_the_isolation_flags_to_the_cli(tmp_path):
     if not hasattr(transport, "_build_command"):  # pragma: no cover
         pytest.skip("SDK transport has no _build_command — re-check by hand")
     cmd = transport._build_command()
-    assert "--setting-sources" in cmd and cmd[cmd.index("--setting-sources") + 1] == ""
+    # The SDK spells it either as one token (`--setting-sources=`, 0.2.168) or as two
+    # (`--setting-sources ""`); both mean "no sources" to the CLI — runner/ci/isolation_probe.sh
+    # proves that against the real CLI. What must never happen: the flag missing, or a value.
+    one_token = [arg for arg in cmd if arg.startswith("--setting-sources=")]
+    if one_token:
+        assert one_token == ["--setting-sources="] and "--setting-sources" not in cmd
+    else:
+        assert cmd.count("--setting-sources") == 1 and cmd[cmd.index("--setting-sources") + 1] == ""
     assert STRICT_MCP_FLAG in cmd

@@ -2,6 +2,21 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.4.1] - 2026-11-16
+First installable release of the 0.4 line: 0.4.0 was tagged, but its runner image 0.2.0 was never published (the image
+CI failed). No runtime code changed; runner image stays 0.2.0.
+
+### Fixed
+- Runner image CI: the test that checks how the real claude-agent-sdk hands the isolation flags to the CLI expected
+  `--setting-sources ""` as two arguments. SDK 0.2.168 (pinned in `runner/requirements.txt`) writes the same thing as
+  one argument, `--setting-sources=`. The test accepts both spellings and still fails when the flag is missing or
+  carries a value. The isolation itself was intact.
+
+### Added
+- Runner image CI runs `runner/ci/isolation_probe.sh` inside the built image: a SessionStart hook in the workspace's
+  `.claude/settings.json` must not run with empty setting sources (both spellings) and must run with
+  `--setting-sources=project` (control). This checks the behaviour of the real CLI, not the SDK's internals.
+
 ## [0.4.0] - 2026-11-15
 Security audit 2026-11. Needs runner image 0.2.0.
 

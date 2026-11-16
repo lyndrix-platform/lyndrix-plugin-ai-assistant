@@ -77,6 +77,11 @@ jobs:
           docker run --rm --entrypoint /opt/bridge/venv/bin/python lyndrix-ai-runner:ci \
             -m pytest /opt/bridge/bridge/tests -q -p no:cacheprovider
 
+      - name: Isolation probe (workspace settings are not loaded)
+        run: |
+          docker run --rm --network none --entrypoint sh \
+            -v "$PWD/runner/ci/isolation_probe.sh:/isolation_probe.sh:ro" lyndrix-ai-runner:ci /isolation_probe.sh
+
       - name: Smoke test /health
         run: |
           docker run -d --name runner-smoke -e LYNDRIX_AI_BRIDGE_TOKEN=ci -p 127.0.0.1:18765:8765 lyndrix-ai-runner:ci
