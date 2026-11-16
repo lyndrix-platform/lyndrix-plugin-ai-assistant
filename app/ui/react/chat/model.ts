@@ -10,7 +10,11 @@ export type TranscriptItem =
   | { id: string; kind: 'assistant'; text: string; streaming: boolean }
   | { id: string; kind: 'thinking'; text: string }
   | { id: string; kind: 'tool'; toolUseId: string; name: string; input: unknown; result?: { output: string; isError: boolean } }
-  | { id: string; kind: 'approval'; approvalId: string; toolUseId: string | null; name: string; input: unknown; decision: string | null }
+  | { id: string; kind: 'approval'; approvalId: string; toolUseId: string | null; name: string; input: unknown; decision: string | null
+      /** Full string the guardrails matched (e.g. the whole Bash command); `input` is a 2 KB summary. */
+      rendered?: string | null
+      /** The summary was cut: only `rendered` shows what will run (AI-11). */
+      truncated?: boolean }
   | { id: string; kind: 'system'; text: string; tone: 'muted' | 'error' }
   | { id: string; kind: 'result'; costUsd: number | null; durationMs: number | null; numTurns: number | null; isError: boolean; text: string | null }
 
@@ -149,6 +153,8 @@ export function applyEvent(prev: TranscriptItem[], ev: StreamEvent): ApplyResult
         id: idx >= 0 ? items[idx].id : id, kind: 'approval', approvalId,
         toolUseId: d.tool_use_id ? str(d.tool_use_id) : null, name: str(d.name, 'tool'), input: d.input,
         decision: idx >= 0 ? (items[idx] as Extract<TranscriptItem, { kind: 'approval' }>).decision : null,
+        rendered: typeof d.rendered === 'string' ? d.rendered : null,
+        truncated: d.input_truncated === true || JSON.stringify(d.input ?? '').includes('… [truncated]'),
       }
       if (idx >= 0) items[idx] = item
       else items.push(item)

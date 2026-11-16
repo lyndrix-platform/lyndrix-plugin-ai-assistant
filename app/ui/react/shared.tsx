@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { assistantApi, PERM_ADMIN, PERM_READ, PERM_WRITE, SHELL_PLUGIN_ID, spaNavigate } from './lib/api'
+import { assistantApi, PERM_ADMIN, PERM_CHAT, PERM_READ, PERM_WRITE, SHELL_PLUGIN_ID, spaNavigate } from './lib/api'
 import type { AccessView } from './lib/api'
 
 // Small presentational pieces + navigation helpers shared by chat and settings.
@@ -41,6 +41,8 @@ export interface Access {
   username: string | null
   isAdmin: boolean
   canWrite: boolean
+  /** Custom permission `chat`: start sessions, send, approve, switch modes. */
+  canChat: boolean
   canRead: boolean
   can: (permission: string) => boolean
 }
@@ -74,6 +76,7 @@ export function useAccess(): Access {
     username: view?.username ?? null,
     isAdmin: evaluate(view, PERM_ADMIN),
     canWrite: evaluate(view, PERM_WRITE),
+    canChat: evaluate(view, PERM_CHAT),
     canRead: evaluate(view, PERM_READ),
     can: (p) => evaluate(view, p),
   }

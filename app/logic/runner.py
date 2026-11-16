@@ -32,6 +32,9 @@ BRIDGE_PORT = 8765
 AGENT_UID = 10000                           # user `agent` in the runner image (Dockerfile ARG AGENT_UID/GID)
 AGENT_GID = 10000
 _CGROUP_ID_RE = re.compile(r"containers/([0-9a-f]{64})")
+# Container env entries that must not reach a process we start in the runner on the
+# agent's behalf (``docker exec`` inherits the container env): they are blanked there.
+SECRET_ENV_KEYS = ("LYNDRIX_AI_BRIDGE_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "LYNDRIX_API_KEY")
 
 
 def _own_container_id() -> Optional[str]:
@@ -60,6 +63,8 @@ class RunnerConfig:
         self.model = model
         self.host_workspace = host_workspace
         self.network = network
+        # memory / cpus / pids, applied with `docker update` (no recreate; not in the fingerprint)
+        self.limits: dict[str, str] = {}
 
     def describe(self) -> str:
         """Secret-free summary for the log (what the fingerprint is made of)."""
@@ -150,6 +155,29 @@ class RunnerManager:
                 return line.split("=", 1)[1].strip() or None
         return None
 
+    @staticmethod
+    def sandbox_git(*args: str, timeout: int = 60) -> Optional[subprocess.CompletedProcess]:
+        """Run ``git <args>`` in ``/workspace`` INSIDE the runner container as the agent
+        user. Blocking. ``None`` when no running runner is reachable from this instance.
+
+        The workspace repository is agent-writable, so its git config may run arbitrary
+        programs; inside the sandbox, as the agent, with the container secrets blanked,
+        that gains the agent nothing it does not already have (AI-05). The core itself
+        never runs git on that repository."""
+        try:
+            if RunnerManager.container_state() != "running":
+                return None
+            cmd = ["exec", "-u", f"{AGENT_UID}:{AGENT_GID}", "-w", "/workspace", "-e", "HOME=/home/agent"]
+            for key in SECRET_ENV_KEYS:
+                cmd += ["-e", f"{key}="]
+            # No fsmonitor/hooks from the agent-writable git config: this also runs outside
+            # any session (status polling), triggered by users without `chat` (D-AI-6).
+            return _docker(*cmd, CONTAINER_NAME, "git", "-c", "core.fsmonitor=false",
+                           "-c", "core.hooksPath=/dev/null", *args, timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as exc:   # no docker CLI here, or a timeout
+            log.debug(f"Runner: sandbox git unavailable — {exc}")
+            return None
+
     def bridge_url(self) -> str:
         return f"http://{CONTAINER_NAME}:{BRIDGE_PORT}"
 
@@ -166,6 +194,20 @@ class RunnerManager:
         try:
             if force or changed or state is None:
                 if state is not None:
+                    # Fetch the image BEFORE removing the working container: the core spawns
+                    # with `--pull always`, so a registry outage or a bad tag used to leave no
+                    # runner at all until the registry was back (AI-08).
+                    pulled = await asyncio.to_thread(_docker, "pull", "-q", cfg.image, timeout=600)
+                    if pulled.returncode != 0:
+                        detail = (pulled.stderr or pulled.stdout or "").strip()[:200]
+                        self.last_error = (f"image {cfg.image} not available ({detail}) — "
+                                           f"the runner keeps its previous configuration")
+                        log.error(f"Runner: {self.last_error}")
+                        if state == "running":
+                            await self._apply_limits(cfg)
+                            health = await self.wait_healthy()
+                            return {**health, "status": "degraded", "error": self.last_error}
+                        return {"status": "error", "error": self.last_error}
                     log.info(f"Runner: recreating {CONTAINER_NAME} ({'forced' if force else 'configuration changed'}) — {cfg.describe()}")
                     await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME)
                 await self._spawn(cfg)
@@ -176,6 +218,7 @@ class RunnerManager:
                     await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME)
                     await self._spawn(cfg)
             self._fingerprint = cfg.fingerprint()
+            await self._apply_limits(cfg)
             return await self.wait_healthy()
         except Exception as exc:  # noqa: BLE001 — health shows it, setup never dies
             self.last_error = str(exc)[:500]
@@ -209,6 +252,26 @@ class RunnerManager:
             raise RuntimeError(f"spawn failed: {(result or {}).get('error') if isinstance(result, dict) else result}")
         log.info(f"Runner: spawned {CONTAINER_NAME} from {cfg.image} on network {cfg.network or 'default'}")
 
+    async def _apply_limits(self, cfg: RunnerConfig) -> None:
+        """Memory/CPU/PID caps via `docker update` — the core's docker:spawn has no such
+        options (core follow-up: limits, cap-drop, no-new-privileges, read-only rootfs)."""
+        args: list[str] = []
+        if cfg.limits.get("memory"):
+            args += ["--memory", cfg.limits["memory"], "--memory-swap", cfg.limits["memory"]]
+        if cfg.limits.get("cpus"):
+            args += ["--cpus", cfg.limits["cpus"]]
+        if cfg.limits.get("pids"):
+            args += ["--pids-limit", cfg.limits["pids"]]
+        if not args:
+            return
+        try:
+            res = await asyncio.to_thread(_docker, "update", *args, CONTAINER_NAME, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(f"Runner: resource limits not applied — {exc}")
+            return
+        if res.returncode != 0:
+            log.warning(f"Runner: resource limits not applied — {(res.stderr or '').strip()[:200]}")
+
     async def wait_healthy(self, attempts: int = 20, pause: float = 1.5) -> dict:
         last: dict = {"status": "starting"}
         for _ in range(attempts):
@@ -234,6 +297,26 @@ class RunnerManager:
         state = await asyncio.to_thread(self.container_state)
         if state is not None:
             await asyncio.to_thread(_docker, "stop", "-t", "10", CONTAINER_NAME, timeout=40)
+
+    async def remove(self) -> bool:
+        """Remove the runner container of this Docker host (and with it the credentials in
+        its env and the bridge's in-memory sessions). The home volume (transcripts for
+        ``resume``) stays. ``False`` when there was nothing to remove or no Docker here."""
+        self.client = None
+        self._fingerprint = None
+        try:
+            state = await asyncio.to_thread(self.container_state)
+            if state is None:
+                return False
+            res = await asyncio.to_thread(_docker, "rm", "-f", CONTAINER_NAME, timeout=60)
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.warning(f"Runner: could not remove {CONTAINER_NAME} — {exc}")
+            return False
+        if res.returncode != 0:
+            log.warning(f"Runner: docker rm {CONTAINER_NAME} failed — {(res.stderr or '').strip()[:200]}")
+            return False
+        log.info(f"Runner: removed {CONTAINER_NAME}.")
+        return True
 
     async def logs(self, tail: int = 200) -> str:
         res = await asyncio.to_thread(_docker, "logs", "--tail", str(tail), CONTAINER_NAME, timeout=20)

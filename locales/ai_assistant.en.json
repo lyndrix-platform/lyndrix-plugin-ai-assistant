@@ -14,7 +14,7 @@
   },
   "chat": {
     "runnerUnavailable": "The assistant runner is not available right now.",
-    "readOnly": "You can read conversations but not write (plugin write permission required).",
+    "readOnly": "You can read conversations but not chat (the assistant's chat permission is required).",
     "notAuthenticatedShort": "Claude is not signed in.",
     "notOwner": "This conversation belongs to another user (read-only).",
     "streamLost": "Lost the live connection to the runner; the transcript was reloaded.",
@@ -81,7 +81,7 @@
       "acceptEdits": "File edits in the workspace run without asking; everything else asks.",
       "auto": "Runs every tool call unless a deny rule blocks it or an ask rule flags it.",
       "plan": "Read-only: nothing is changed.",
-      "bypass": "Allows everything and disables the guardrails — administrators only."
+      "bypass": "Never asks; deny rules still apply — administrators only."
     }
   },
   "approval": {
@@ -95,7 +95,8 @@
     "allow": "Allow",
     "deny": "Deny",
     "allowAlways": "Always allow",
-    "allowAlwaysHint": "Allow this tool for the rest of the session without asking again.",
+    "allowAlwaysHint": "Allow exactly this call for the rest of the session without asking again.",
+    "longInput": "Long request — scroll through all of it before you allow it. \"Always allow\" is off for it.",
     "resolvedLine": "Tool permission: {{decision}}",
     "autoLine": "Tool {{name}}: {{decision}} automatically by policy"
   },
@@ -177,8 +178,8 @@
     "runnerConfigured": "A credential is configured in the runner (not verified yet)."
   },
   "instructions": {
-    "title": "Generated instructions (CLAUDE.md)",
-    "body": "Read-only preview of the CLAUDE.md the plugin writes into the workspace: the Lyndrix base instructions, every loaded plugin's ai_instructions and the operator's extra instructions. Regenerated on every workspace sync.",
+    "title": "Agent instructions (system prompt)",
+    "body": "Read-only preview of the instructions every session gets as its system prompt: the Lyndrix base instructions, the index of the loaded plugins and the operator's extra instructions. The workspace keeps a copy as CLAUDE.md for reference; the assistant does not load it, because every session can edit the shared workspace.",
     "empty": "(empty — the workspace has not been synchronised yet)"
   },
   "logs": {

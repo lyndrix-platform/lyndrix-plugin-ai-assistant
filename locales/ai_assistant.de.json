@@ -14,7 +14,7 @@
   },
   "chat": {
     "runnerUnavailable": "Der Assistenten-Runner ist gerade nicht verfügbar.",
-    "readOnly": "Du kannst Unterhaltungen lesen, aber nicht schreiben (Schreibrecht für das Plugin erforderlich).",
+    "readOnly": "Du kannst Unterhaltungen lesen, aber nicht chatten (dafür ist das Chat-Recht des Assistenten nötig).",
     "notAuthenticatedShort": "Claude ist nicht angemeldet.",
     "notOwner": "Diese Unterhaltung gehört einem anderen Benutzer (nur lesen).",
     "streamLost": "Live-Verbindung zum Runner verloren; der Verlauf wurde neu geladen.",
@@ -81,7 +81,7 @@
       "acceptEdits": "Dateiänderungen im Workspace laufen ohne Rückfrage, alles andere fragt.",
       "auto": "Führt jeden Werkzeugaufruf aus, sofern keine Deny-Regel blockt oder eine Ask-Regel greift.",
       "plan": "Nur lesen: Es wird nichts verändert.",
-      "bypass": "Erlaubt alles und schaltet die Guardrails ab – nur für Administratoren."
+      "bypass": "Fragt nie; Deny-Regeln gelten weiter – nur für Administratoren."
     }
   },
   "approval": {
@@ -95,7 +95,8 @@
     "allow": "Erlauben",
     "deny": "Ablehnen",
     "allowAlways": "Immer erlauben",
-    "allowAlwaysHint": "Dieses Tool für den Rest der Sitzung ohne Rückfrage erlauben.",
+    "allowAlwaysHint": "Genau diesen Aufruf für den Rest der Sitzung ohne Rückfrage erlauben.",
+    "longInput": "Lange Anfrage – vor dem Erlauben ganz durchlesen. „Immer erlauben“ ist dafür gesperrt.",
     "resolvedLine": "Tool-Freigabe: {{decision}}",
     "autoLine": "Tool {{name}}: {{decision}} — automatisch durch Richtlinie"
   },
@@ -177,8 +178,8 @@
     "runnerConfigured": "Zugangsdaten sind im Runner hinterlegt (noch nicht geprüft)."
   },
   "instructions": {
-    "title": "Generierte Instruktionen (CLAUDE.md)",
-    "body": "Schreibgeschützte Vorschau der CLAUDE.md, die das Plugin in den Workspace schreibt: Lyndrix-Grundinstruktionen, die ai_instructions aller geladenen Plugins und die Zusatzinstruktionen des Betreibers. Wird bei jedem Workspace-Sync neu erzeugt.",
+    "title": "Instruktionen des Agenten (System-Prompt)",
+    "body": "Schreibgeschützte Vorschau der Instruktionen, die jede Session als System-Prompt bekommt: Lyndrix-Grundinstruktionen, der Index der geladenen Plugins und die Zusatzinstruktionen des Betreibers. Der Workspace enthält eine Kopie als CLAUDE.md zum Nachlesen; der Assistent lädt sie nicht, weil jede Session den gemeinsamen Workspace ändern kann.",
     "empty": "(leer — der Workspace wurde noch nicht synchronisiert)"
   },
   "logs": {

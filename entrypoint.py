@@ -22,7 +22,7 @@ PLUGIN_ID = "lyndrix.plugin.ai_assistant"
 manifest = ModuleManifest(
     id=PLUGIN_ID,
     name="KI-Assistent",
-    version="0.3.0",
+    version="0.4.0",
     description="Claude Code als Assistent in Lyndrix: Chat, Werkzeug-Freigaben, Plugin-Wissen.",
     author="Lyndrix",
     icon="smart_toy",
@@ -43,6 +43,7 @@ manifest = ModuleManifest(
         "id": "chat", "label": "KI-Chat", "icon": "smart_toy",
         "description": "Chat mit dem KI-Assistenten als schwebendes Fenster.",
         "default_size": {"width": 440, "height": 620},
+        "permission": "plugin:lyndrix.plugin.ai_assistant:chat",
     }],
     # Short purpose for the AI index (core API 1.12); the full guide is served live
     # from ai/INSTRUCTIONS.md at /ai/instructions.
@@ -55,25 +56,44 @@ manifest = ModuleManifest(
     permissions={
         "subscribe": ["db:connected", "vault:ready_for_data", "system:boot_complete",
                       "plugin:settings_changed", "plugin:state_changed", "socket:response"],
-        "emit": ["socket:request"],
+        "emit": ["socket:request", "plugin:settings_changed"],
     },
+    # Custom permissions are not covered by the global api:read/api:write baseline every
+    # INT_USER gets on every plugin — only they gate for real. Chatting means running
+    # tools in the one shared runner container (Claude credential, the agent's Lyndrix
+    # key), so it is an explicit grant (`chat`), not plugin write access (AI-01).
     custom_permissions=[
         {"id": "api:admin", "label": "Assistant administration",
-         "description": "Runner, workspace, Claude login and Vault-space access."},
+         "description": "Runner, workspace, Claude login, guardrails and every user's sessions."},
+        {"id": "chat", "label": "Chat with the assistant",
+         "description": "Start sessions, send messages and approve the assistant's tool calls. The calls run in the "
+                        "shared runner container, which also holds the Claude credential — grant only to trusted users."},
+        {"id": "agent_vault", "label": "Read the agent's Vault spaces",
+         "description": "Values of the Vault spaces listed in the setting vault_spaces (the assistant's own account)."},
+        {"id": "auto_mode", "label": "Use the Auto approval mode",
+         "description": "Sessions in Auto run every tool call the deny/ask guardrails do not stop — without a human "
+                        "in the loop, so prompt injection (web pages, tool output) acts unchecked."},
     ],
     roles=[
         {"id": "viewer", "label": "AI Assistant Viewer",
          "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read"],
-         "auto_map_groups": [], "description": "Read chat sessions."},
+         "auto_map_groups": [], "description": "Read own chat sessions."},
         {"id": "user", "label": "AI Assistant User",
-         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write"],
+         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
+                         "plugin:lyndrix.plugin.ai_assistant:chat"],
          "auto_map_groups": [], "description": "Chat with the assistant and approve its tool calls."},
+        {"id": "power_user", "label": "AI Assistant Power User",
+         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
+                         "plugin:lyndrix.plugin.ai_assistant:chat", "plugin:lyndrix.plugin.ai_assistant:auto_mode"],
+         "auto_map_groups": [], "description": "Like User, plus the Auto approval mode."},
         {"id": "agent", "label": "AI Assistant Agent",
-         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:admin"],
-         "auto_map_groups": [], "description": "The assistant's own account: read status and allowed Vault spaces."},
+         "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:agent_vault"],
+         "auto_map_groups": [], "description": "The assistant's own account: read status and the allowed Vault spaces. "
+                                               "Never plugin admin — every chat user can act through it."},
         {"id": "admin", "label": "AI Assistant Administrator",
          "permissions": ["plugin:lyndrix.plugin.ai_assistant:api:read", "plugin:lyndrix.plugin.ai_assistant:api:write",
-                         "plugin:lyndrix.plugin.ai_assistant:api:admin"],
+                         "plugin:lyndrix.plugin.ai_assistant:api:admin", "plugin:lyndrix.plugin.ai_assistant:chat",
+                         "plugin:lyndrix.plugin.ai_assistant:agent_vault", "plugin:lyndrix.plugin.ai_assistant:auto_mode"],
          "auto_map_groups": ["INT_ADMIN"], "description": "Full control: login, runner, workspace, guardrails."},
     ],
     settings_schema=[
@@ -88,10 +108,16 @@ manifest = ModuleManifest(
          "description": "Only when authentication is api_key. Never set together with a subscription token."},
         {"key": "model", "label": "Model", "kind": "str", "category": "Provider",
          "description": "Optional model override (e.g. claude-sonnet-4-5). Empty = Claude Code default."},
-        {"key": "runner_image", "label": "Runner image", "kind": "str", "default": "ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest",
-         "category": "Runner", "description": "Container image with Claude Code + bridge. Changing it recreates the runner."},
+        {"key": "runner_image", "label": "Runner image", "kind": "str", "default": "",
+         "category": "Runner", "description": "Container image with Claude Code + bridge. Empty = the version this plugin release was tested with (ghcr.io/lyndrix-platform/lyndrix-ai-runner:<runner version>; the old default ':latest' is treated the same). Prefer a version tag or digest over :latest. Changing it recreates the runner — the new image is pulled first, and the running container stays if the pull fails."},
+        {"key": "runner_memory", "label": "Runner memory limit", "kind": "str", "default": "4g", "category": "Runner",
+         "description": "Memory cap of the runner container (docker update; e.g. 4g). 0 = none."},
+        {"key": "runner_cpus", "label": "Runner CPU limit", "kind": "str", "default": "2", "category": "Runner",
+         "description": "CPU cap of the runner container (e.g. 2 or 1.5). 0 = none."},
+        {"key": "runner_pids_limit", "label": "Runner process limit", "kind": "int", "default": "1024", "category": "Runner",
+         "description": "Maximum number of processes in the runner container (stops fork bombs). 0 = none."},
         {"key": "agent_lyndrix_access", "label": "Agent gets its own Lyndrix account", "kind": "bool", "default": "true",
-         "category": "Runner", "description": "Creates the user `ai-assistant` (bot) with an API key and passes LYNDRIX_API_URL/KEY into the runner. Grant it roles in the Users page."},
+         "category": "Runner", "description": "Creates the user `ai-assistant` (bot) with an API key and passes LYNDRIX_API_URL/KEY into the runner. Every user with the chat permission can act through this account (tool calls in the shared runner can read the key) — grant it only roles every chat user may have. It is never plugin admin."},
         {"key": "agent_api_url", "label": "Lyndrix API URL for the agent", "kind": "str", "category": "Runner",
          "description": "How the runner reaches this instance. Empty = http://<this container>:8081 on the shared Docker network."},
         {"key": "workspace_repo_url", "label": "Workspace repository", "kind": "str", "category": "Workspace",
@@ -103,16 +129,20 @@ manifest = ModuleManifest(
          "description": "Operator notes appended to the generated CLAUDE.md (Markdown; use ';' for line breaks)."},
         {"key": "permission_mode", "label": "Tool approval mode", "kind": "select",
          "options": ["default", "acceptEdits", "plan", "auto", "bypassPermissions"], "default": "default", "category": "Guardrails",
-         "description": "Start mode of new sessions (switchable per session in the chat): default asks for every tool; acceptEdits allows file edits in the workspace; plan never mutates; auto allows everything the deny/ask rules do not stop; bypassPermissions allows everything incl. the guardrails (admins only)."},
+         "description": "Start mode of new sessions (switchable per session in the chat): default asks for every tool; acceptEdits allows file edits in the workspace; plan never mutates; auto allows everything the deny/ask rules do not stop (needs the auto_mode permission); bypassPermissions never asks (admins only) — deny rules still apply. A default the user may not use starts the session in default."},
         {"key": "guardrails_allow", "label": "Always allow", "kind": "str", "category": "Guardrails",
-         "description": "Rules 'Tool' or 'Tool: regex' separated by ';' that run without asking, e.g. 'Read; Grep; Glob; Bash: ^git (status|log|diff)'."},
+         "description": "Rules 'Tool' or 'Tool: regex' separated by ';' that run without asking, e.g. 'Read; Grep; Glob; Bash: ^git (status|diff|log --oneline)$'. The regex must match from the start of the command/path — anchor the end with $ as well, or arguments ride along (git log --output=FILE writes files). A Bash command containing ; & | ` $( < > or a line break, and a path with . or .. segments, are never covered by an allow rule."},
         {"key": "guardrails_ask", "label": "Always ask", "kind": "str", "category": "Guardrails",
-         "description": "Rules that always need an approval in the chat even in acceptEdits/bypass mode, e.g. 'Bash: ^git push'."},
+         "description": "Rules that always need an approval in the chat, e.g. 'Bash: ^git push'. Checked for every tool call (a PreToolUse hook), also for calls the CLI would allow on its own and in acceptEdits; the regex matches anywhere."},
         {"key": "guardrails_deny", "label": "Always deny", "kind": "str", "category": "Guardrails",
-         "description": "Rules that are refused without asking, e.g. 'Bash: rm -rf; Bash: curl .*\\| *sh'."},
+         "description": "Rules that are refused without asking, e.g. 'Bash: rm -rf; Bash: curl .*\\| *sh'. Enforced for every tool call in every mode, bypassPermissions included; the regex matches anywhere, also with collapsed whitespace. Built in on top: environment dumps, /proc/*/environ, the Claude/bridge credential variables and edits under .git/ are always refused."},
         {"key": "vault_spaces", "label": "Vault spaces for the agent", "kind": "str", "category": "Guardrails",
-         "description": "Comma-separated KV spaces below the lyndrix mount the agent may read via the plugin API, e.g. 'plugins/lyndrix.plugin.docker'. Empty = none."},
+         "description": "Comma-separated KV spaces below the lyndrix mount the agent may read via the plugin API, e.g. 'plugins/lyndrix.plugin.docker'. Every chat user can read these values through the agent. Empty = none."},
         {"key": "max_turns", "label": "Max agent turns per message", "kind": "int", "default": "40", "category": "Guardrails"},
+        {"key": "transcript_retention_days", "label": "Keep conversations (days)", "kind": "int", "default": "0",
+         "category": "Guardrails", "description": "Conversations without activity for longer are deleted with their transcript (checked every 6 h on the runner host). 0 = keep forever. Token-shaped strings (Claude/Lyndrix/Git/Vault tokens, Bearer values, private keys) are never stored in a transcript."},
+        {"key": "prune_transcripts", "label": "Apply retention now", "kind": "action", "action": "/maintenance/prune",
+         "method": "POST", "confirm": True, "danger": True, "category": "Guardrails"},
         {"key": "sync_workspace", "label": "Sync workspace & instructions", "kind": "action",
          "action": "/workspace/sync", "method": "POST", "category": "Workspace"},
         {"key": "restart_runner", "label": "Restart runner", "kind": "action", "action": "/runner/restart",
@@ -192,11 +222,30 @@ async def health(ctx) -> PluginHealthStatus:
     }
     if ai_service.auth_mode() == "none":
         return PluginHealthStatus(status="degraded", details={**details, "reason": "claude_not_logged_in"}, latency_ms=latency)
+    outdated = ai_service.runner_outdated(runner)
+    if outdated:
+        return PluginHealthStatus(status="degraded", details={**details, "runner": "degraded", "reason": "runner_outdated",
+                                                              "message": outdated}, latency_ms=latency)
     if ai_service.is_runner_host and runner.get("status") not in ("ok", "degraded"):
         return PluginHealthStatus(status="degraded", details={**details, "reason": "runner_unavailable"}, latency_ms=latency)
     return PluginHealthStatus(status="ok", details=details, latency_ms=latency)
 
 
-def teardown(ctx):
+def _being_disabled() -> bool:
+    """Core 1.11 sets the registry status to ``disabled`` before it calls teardown on
+    disable; reload/upgrade/uninstall unload with the status unchanged."""
+    try:
+        from core.api import module_registry  # type: ignore[attr-defined]
+
+        status_of = getattr(module_registry, "status", None)
+        return callable(status_of) and status_of(PLUGIN_ID) == "disabled"
+    except Exception:  # noqa: BLE001 — older cores: treat as a reload (keep the runner)
+        return False
+
+
+async def teardown(ctx):
     plugin_state["ready"] = False
-    ctx.log.info("KI-Assistent: teardown complete (runner container keeps running).")
+    disabling = _being_disabled()
+    await ai_service.shutdown(disabling=disabling)
+    ctx.log.info("KI-Assistent: teardown complete "
+                 + ("(disabled: runner removed, agent keys revoked)." if disabling else "(runner container keeps running)."))

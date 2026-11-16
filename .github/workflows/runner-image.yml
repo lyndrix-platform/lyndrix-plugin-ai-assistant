@@ -75,7 +75,7 @@ jobs:
       - name: Run bridge test suite inside the image
         run: |
           docker run --rm --entrypoint /opt/bridge/venv/bin/python lyndrix-ai-runner:ci \
-            -m pytest /opt/bridge/bridge/tests -q
+            -m pytest /opt/bridge/bridge/tests -q -p no:cacheprovider
 
       - name: Smoke test /health
         run: |
@@ -86,6 +86,12 @@ jobs:
           done
           cat health.json
           docker logs runner-smoke
+          # AI-03: only the token-free liveness probe answers from inside the container, and
+          # the agent's uid cannot read the (non-dumpable) bridge's environment.
+          docker exec runner-smoke curl -fsS http://127.0.0.1:8765/livez
+          test "$(docker exec runner-smoke curl -s -o /dev/null -w '%{http_code}' -H 'X-Bridge-Token: ci' http://127.0.0.1:8765/health)" = "403"
+          if docker exec runner-smoke cat /proc/1/environ > /dev/null 2>&1; then echo "bridge environment readable by the agent" >&2; exit 1; fi
+          if docker exec runner-smoke touch /opt/bridge/bridge/policy.py 2> /dev/null; then echo "bridge code writable by the agent" >&2; exit 1; fi
           docker rm -f runner-smoke
           test "$(jq -r .claude_version health.json)" = "$(docker run --rm --entrypoint claude lyndrix-ai-runner:ci --version | cut -d' ' -f1)"
 

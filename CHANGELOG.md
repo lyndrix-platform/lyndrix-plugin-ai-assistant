@@ -2,6 +2,70 @@
 
 All notable changes to this plugin are documented here.
 
+## [0.4.0] - 2026-11-15
+Security audit 2026-11. Needs runner image 0.2.0.
+
+### Upgrade notes
+- Grant "AI Assistant User" to everyone who should chat (and "Power User" for Auto).
+- Publish runner image 0.2.0 before the plugin release.
+  If the plugin runs first anyway, chat answers 503 and health is `degraded` (`runner_outdated`) until the image
+  is there; the watchdog retries the pull every minute and recreates the runner on its own.
+- Rebuild the React bundle.
+- Recommendation, the owner decides: if a workspace remote was configured, its git token was readable by the agent in
+  `.git/config`. The upgrade removes it from there but does not invalidate it.
+- Disable the plugin before uninstalling it.
+- All chat users must trust each other until per-user isolation exists.
+- Minimum core stays 1.11.0 (tested against 1.11.1). Newer core APIs are used only behind `getattr`.
+
+### Security
+- Chatting (create, send, approve, switch mode, interrupt) needs the new permission `chat`. Roles `user`, `power_user` and `admin` have it. The global `api:write` baseline of `INT_USER` no longer opens the runner.
+- The agent account `ai-assistant` is never plugin admin. Its role is `api:read` + `agent_vault`, and `api:admin` is removed.
+- `bypassPermissions` is admin-only and `auto` needs `auto_mode`. Both are enforced on create, switch and restore; the operator default only applies when allowed.
+- Runner bridge (runner 0.2.0):
+  - secrets are removed from its environment and the process is non-dumpable;
+  - the CLI gets the credentials explicitly, never the bridge token;
+  - local requests are refused except on the token-free `/livez`;
+  - its code is root-owned and the image has no HEALTHCHECK.
+- Sessions load no workspace settings and no `CLAUDE.md`; instructions arrive as a system prompt from the plugin. `--strict-mcp-config` is passed when the CLI supports it. Login and verification run in a throwaway config dir.
+- Guardrails:
+  - a PreToolUse hook enforces deny/ask rules in every mode;
+  - allow rules are anchored, never cover chained, substituted or redirected Bash commands, and never cover non-normalised paths;
+  - built-in denies cover environment dumps, `/proc/*/environ`, credential variable names, `.git/` edits, git hooks/`hooksPath`/`fsmonitor` and `git --output`;
+  - an edited input on approval is checked again.
+- Workspace:
+  - the core never follows agent symlinks and never runs git in the agent repository;
+  - remote updates are merged inside the runner;
+  - no token is stored in `.git/config`, and tokens left there by 0.3.0 clones are removed.
+- Transcripts: token-shaped strings are redacted before they are stored.
+- Disabling the plugin revokes the agent's API keys and then removes the runner container (keys first, so a slow
+  `docker rm` cannot push the revocation past the core's teardown budget).
+- **A runner bridge older than the pinned version is refused (fail-closed).** When the image could not be pulled, the
+  previous container kept running and its old bridge answered "ok", so chat was served without the isolation of
+  runner 0.2.0. New sessions, messages and approvals now answer 503, status and health show `runner_outdated`, and the
+  watchdog keeps retrying. The same applies to a `runner_image` set to an older tag.
+- The chat panel is offered only to users with the `chat` permission.
+- Git commands the plugin runs in the workspace ignore `core.fsmonitor` and hooks from the agent-writable git config.
+
+### Added
+- `DELETE /sessions/{id}?purge=true`.
+- Settings `transcript_retention_days`, `runner_memory`, `runner_cpus`, `runner_pids_limit`, and the action "Apply retention now".
+- `GET /status` carries `caller` and `workspace.remote_credentials_removed`.
+
+### Changed
+- Default runner image is pinned to the tested runner version (0.2.0) instead of `:latest`. A stored `:latest` of the official image counts as the default.
+- A recreate pulls the image first and keeps the old container when the pull fails.
+- The approval card shows the full command. "Always allow" means exactly this call and is unavailable for long requests.
+
+### Fixed
+- Remote workspaces never fast-forwarded after the first sync.
+- The SSE error frame was invalid JSON.
+- Vault spaces with `/` could not be read.
+- A revoked agent key kept being injected.
+- An invalid `max_turns` caused a 500.
+- Blocking DB reads ran on the event loop.
+- A recorder cancelled by a reload lost the rest of the turn.
+- Purging a running conversation left rows behind.
+
 ## [0.3.0] - 2026-10-16
 ### Added
 - Approval mode switch per session (chat composer): Ask (`default`), Edits (`acceptEdits`), **Auto** (`auto` — every tool call runs unless a deny rule blocks it or an ask rule flags it) and Plan; `bypassPermissions` stays admin-only because it also disables the guardrails. Bridge: `POST /sessions/{id}/permission-mode`, mode `auto` maps to the CLI's `default` so the policy is still consulted; a live CLI is switched in place.

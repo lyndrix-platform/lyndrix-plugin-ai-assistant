@@ -8,31 +8,55 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from core.api import get_logger
 
 from ..model.database import db_ready, ensure_tables, get_session, retry_write
 from ..model.models import AiMessage, AiSession
-from .access import ensure_assistant_user, issue_api_key, parse_vault_spaces, read_vault_space
+from .access import (
+    assistant_key_valid,
+    ensure_assistant_user,
+    issue_api_key,
+    parse_vault_spaces,
+    read_vault_space,
+    revoke_assistant_keys,
+)
 from .bridge import BridgeClient, BridgeError
+from .instructions import collect_plugin_index, render_instructions
+from .redact import redact, redact_obj
 from .runner import RunnerConfig, RunnerManager
 from .workspace import WorkspaceManager
 
 log = get_logger("Plugin:AI:Service")
 
-PLUGIN_VERSION = "0.3.0"              # kept in sync with entrypoint.manifest.version by tests
+PLUGIN_VERSION = "0.4.0"              # kept in sync with entrypoint.manifest.version by tests
+PLUGIN_ID = "lyndrix.plugin.ai_assistant"
 PROVIDERS = ("claude-code",)           # "hermes" follows once the Hermes provider exists
 # "auto" = the bridge allows every call the guardrails do not deny or flag "ask";
 # unlike bypassPermissions it keeps the deny/ask rules in force.
 PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "bypassPermissions")
-DEFAULT_IMAGE = "ghcr.io/lyndrix-platform/lyndrix-ai-runner:latest"
+# Modes every chat user may pick. "auto" (no human in the loop for unmatched calls)
+# needs the permission auto_mode, "bypassPermissions" (no guardrails at all) plugin
+# admin — the router computes the caller's set, the service enforces it (AI-02).
+SAFE_MODES = ("default", "acceptEdits", "plan")
+# The runner image this plugin release is tested with: runner/VERSION, which the image
+# CI publishes as :<VERSION> (tests keep both equal). Pinned instead of :latest — every
+# recreate used to pull whatever was pushed last, with all secrets in its env (AI-08).
+RUNNER_VERSION = "0.2.0"
+IMAGE_REPO = "ghcr.io/lyndrix-platform/lyndrix-ai-runner"
+DEFAULT_IMAGE = f"{IMAGE_REPO}:{RUNNER_VERSION}"
+# The old manifest default; a stored copy of it means "the default", not "follow latest".
+LEGACY_DEFAULT_IMAGE = f"{IMAGE_REPO}:latest"
 TRANSCRIPT_MAX_CHARS = 6000
+PRUNE_INTERVAL_S = 6 * 3600          # retention sweep cadence on the runner host
+PURGE_BATCH = 500                    # rows per DELETE (stays far below the DB statement cap)
 
 
 def _utcnow() -> datetime:
@@ -56,6 +80,7 @@ class AiAssistantService:
         self._seqs: dict[str, int] = {}          # last bridge event seq seen per session
         self._health_cache: tuple[float, dict] | None = None
         self.is_runner_host = False      # set by the lease: this instance drives the container
+        self._last_prune = 0.0
 
     # ------------------------------------------------------------------ wiring
 
@@ -67,8 +92,9 @@ class AiAssistantService:
             self.storage_dir = Path(getattr(core_settings, "STORAGE_DIR", "/data/storage"))
         except Exception:
             pass
-        self.workspace = WorkspaceManager(self.storage_dir)
         self.runner = RunnerManager(socket_client, self.storage_dir)
+        # git commands that must run in the agent-writable repository run in the runner
+        self.workspace = WorkspaceManager(self.storage_dir, sandbox_git=self.runner.sandbox_git)
 
     @property
     def is_ready(self) -> bool:
@@ -138,6 +164,13 @@ class AiAssistantService:
         )
         return result
 
+    def instructions_text(self) -> str:
+        """The agent's instructions, built from the core's own data (base text, plugin
+        index from the registry, operator notes). Sent to the CLI as
+        ``append_system_prompt``; never read back from the agent-writable workspace,
+        where any session could rewrite CLAUDE.md for everybody (AI-04)."""
+        return render_instructions(collect_plugin_index(), self.setting("extra_instructions"))
+
     async def refresh_instructions(self) -> dict:
         if self.workspace is None:
             return {"ok": False}
@@ -169,13 +202,29 @@ class AiAssistantService:
         auth_env = dict(self.auth_env())
         auth_env.update(await self._agent_access_env())
         return RunnerConfig(
-            image=str(self.setting("runner_image", DEFAULT_IMAGE)),
+            image=self.runner_image(),
             auth_env=auth_env,
             bridge_token=await self._bridge_token(),
             model=self.setting("model"),
             host_workspace=f"{host_storage.rstrip('/')}/ai_workspace/repo",
             network=await asyncio.to_thread(RunnerManager.own_network),
         )
+
+    def runner_image(self) -> str:
+        image = str(self.setting("runner_image", DEFAULT_IMAGE)).strip()
+        return DEFAULT_IMAGE if image in ("", LEGACY_DEFAULT_IMAGE) else image
+
+    def runner_limits(self) -> dict[str, str]:
+        """Resource caps for the runner container (``docker update``): a runaway or
+        injected agent must not starve the runner host, which also runs the
+        orchestrator's jobs (AI-08). Empty or 0 = no cap for that resource."""
+        limits: dict[str, str] = {}
+        for key, flag, default in (("runner_memory", "memory", "4g"), ("runner_cpus", "cpus", "2"),
+                                   ("runner_pids_limit", "pids", "1024")):
+            value = str(self.setting(key, default)).strip().lower()
+            if value and value not in ("0", "none", "off"):
+                limits[flag] = value
+        return limits
 
     async def _agent_access_env(self) -> dict[str, str]:
         """``LYNDRIX_API_URL`` / ``LYNDRIX_API_KEY`` for the agent's own Lyndrix
@@ -187,6 +236,9 @@ class AiAssistantService:
         try:
             await asyncio.to_thread(ensure_assistant_user)
             key = await asyncio.to_thread(get_secret, "assistant_api_key") if callable(get_secret) else None
+            if key and not await asyncio.to_thread(assistant_key_valid, key):
+                log.warning("The stored assistant API key is no longer valid (revoked?) — issuing a new one.")
+                key = None
             if not key:
                 key = await asyncio.to_thread(issue_api_key)
                 if callable(set_secret):
@@ -236,6 +288,15 @@ class AiAssistantService:
         await asyncio.to_thread(write_secret_dict, path, data)
         log.info(f"Claude OAuth token stored by '{by}' — restarting the runner with it.")
         await asyncio.to_thread(self.reload_settings)
+        # The core announces settings it writes itself; this write bypasses it, so tell
+        # every instance (bridged topic, never the value) — peers kept the old token.
+        emit = getattr(self.ctx, "emit", None)
+        if callable(emit):
+            try:
+                emit("plugin:settings_changed", {"plugin_id": PLUGIN_ID, "keys": ["claude_oauth_token", "claude_auth_mode"],
+                                                 "by": by}, cluster=True)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Could not announce the new Claude token to the other instances — {exc}")
         await self.ensure_runner(force=True)
 
     def start_login_finisher(self, auth_id: str, *, by: str) -> None:
@@ -305,9 +366,50 @@ class AiAssistantService:
             return {"status": "not_bound"}
         async with self._runner_lock:
             cfg = await self.runner_config()
+            cfg.limits = self.runner_limits()
             health = await self.runner.ensure(cfg, force=force)
             self._health_cache = None
+            await self._reattach_recorders()
+            if self.workspace is not None and self.workspace.update_pending:
+                # a remote update fetched while no runner was up: merge it in the sandbox now
+                await asyncio.to_thread(self.workspace.apply_pending_update)
+            if self.workspace is not None and self.workspace.credentials_scrub_pending:
+                await asyncio.to_thread(self.workspace.scrub_remote_credentials)
             return health
+
+    @staticmethod
+    def _version_tuple(value: Any) -> Optional[tuple[int, ...]]:
+        parts = str(value or "").strip().lstrip("v").split("-", 1)[0].split(".")
+        try:
+            return tuple(int(p) for p in parts) if parts and parts[0] else None
+        except ValueError:
+            return None
+
+    def runner_outdated(self, health: Optional[dict]) -> Optional[str]:
+        """Why the answering bridge is too old for this plugin, else ``None``.
+
+        The plugin pins the runner it was tested with (``RUNNER_VERSION``). When that
+        image cannot be pulled, the previous container keeps running — and an older
+        bridge lacks the isolation this plugin relies on (bridge token outside the agent
+        env, no workspace settings, PreToolUse hook). It answers ``/health`` "ok", so
+        the version is the only signal (D-AI-2). A bridge that reports no parsable
+        version counts as too old; one that does not answer at all is not "outdated"
+        but unavailable (handled elsewhere)."""
+        if not health or health.get("status") not in ("ok", "degraded"):
+            return None
+        have = self._version_tuple(health.get("bridge_version"))
+        need = self._version_tuple(RUNNER_VERSION)
+        if have is not None and need is not None and have >= need:
+            return None
+        return (f"runner bridge {health.get('bridge_version') or 'unknown'} is older than the required "
+                f"{RUNNER_VERSION} — chat is disabled until the runner image {self.runner_image()} is running")
+
+    async def require_current_runner(self) -> None:
+        """Fail closed: no session, message or approval goes to a bridge older than
+        ``RUNNER_VERSION`` (D-AI-2)."""
+        reason = self.runner_outdated(await self.runner_health())
+        if reason:
+            raise BridgeError(503, reason)
 
     async def _runner_watchdog(self, interval: float = 60.0) -> None:
         """Lease holder: bring the runner back when the image appears later, the
@@ -318,10 +420,15 @@ class AiAssistantService:
                 break
             try:
                 health = await self.runner.health()
-                if health.get("status") in ("not_started", "unreachable", "error"):
+                # Also when the previous ensure could not pull the image (the old container
+                # answers "ok", so only last_error/the bridge version tell) — D-AI-2.
+                if (health.get("status") in ("not_started", "unreachable", "error")
+                        or self.runner_outdated(health)
+                        or getattr(self.runner, "last_error", None)):
                     await self.ensure_runner()
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"Runner watchdog: {exc}")
+            await self.maybe_prune()
 
     async def start_runner_role(self) -> None:
         """``on_lease`` acquired: this instance drives the container."""
@@ -337,6 +444,45 @@ class AiAssistantService:
     async def stop_runner_role(self) -> None:
         """``on_lease`` lost: stop driving (the container keeps running for the peer)."""
         self.is_runner_host = False
+
+    async def shutdown(self, *, disabling: bool) -> None:
+        """Plugin teardown. Reload/upgrade/core shutdown: stop this incarnation's loops,
+        leave the runner running (sessions continue; the next incarnation re-attaches).
+        Disabled: no container with the operator's Claude credential and the agent's key
+        may outlive the plugin, so remove the runner of this host, revoke the agent's
+        keys and forget the stored one (a re-enable issues a fresh key) — AI-10.
+
+        TODO(agent): uninstall is indistinguishable from a reload here (core 1.11 calls
+        the same teardown); it needs a core uninstall hook. Until then: disable first."""
+        self.is_runner_host = False
+        for task in (self._watchdog, self._login_task):
+            if task is not None and not task.done():
+                task.cancel()
+        if not disabling:
+            return
+        if self.is_ready:
+            # Keys first: `docker rm -f` may take up to 60 s, core 1.12 waits only its
+            # teardown budget (15 s) — the revocation must not sit behind it (D-AI-5).
+            try:
+                await asyncio.to_thread(revoke_assistant_keys)
+            except Exception as exc:  # noqa: BLE001 — never fail the teardown
+                log.warning(f"Could not revoke the assistant's API keys — {exc}")
+        if self.runner is not None:
+            await self.runner.remove()
+        if self.is_ready:
+            # The bridge sessions went with the container: no turn of a busy row goes on.
+            try:
+                for sid in await asyncio.to_thread(self._busy_session_ids):
+                    await self._set_status(sid, "idle")
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Could not reset busy sessions — {exc}")
+        set_secret = getattr(self.ctx, "set_secret", None)
+        if callable(set_secret):
+            try:
+                await asyncio.to_thread(set_secret, "assistant_api_key", "")
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"Could not clear the stored assistant key — {exc}")
+        log.info("KI-Assistent disabled: runner removed, agent keys revoked.")
 
     async def runner_health(self, max_age_s: float = 15.0) -> dict:
         import time
@@ -356,12 +502,16 @@ class AiAssistantService:
 
     async def status(self) -> dict:
         ws = await asyncio.to_thread(self.workspace.status) if self.workspace else {}
+        runner = await self.runner_health()
+        outdated = self.runner_outdated(runner)
         return {
             "provider": str(self.setting("provider", "claude-code")),
             "auth_mode": self.auth_mode(),
-            "runner": await self.runner_health(),
+            "runner": {**runner, "status": "degraded"} if outdated else runner,
             "runner_host": self.is_runner_host,
-            "runner_error": getattr(self.runner, "last_error", None),
+            "runner_error": outdated or getattr(self.runner, "last_error", None),
+            "runner_outdated": bool(outdated),
+            "runner_required_version": RUNNER_VERSION,
             "workspace": ws,
             "db_ready": self.is_ready,
             "permission_mode": str(self.setting("permission_mode", "default")),
@@ -412,19 +562,44 @@ class AiAssistantService:
             for r in reversed(rows)
         ]
 
+    def _start_mode(self, requested: Optional[str], allowed_modes: Iterable[str]) -> str:
+        """The mode a session starts (or restarts) in. An explicit request the caller may
+        not use is refused; the operator default only applies when the caller may use it
+        — a default of auto/bypassPermissions must not hand those modes to everyone."""
+        allowed = set(allowed_modes)
+        if requested:
+            if requested not in PERMISSION_MODES:
+                raise ValueError(f"permission_mode must be one of {PERMISSION_MODES}")
+            if requested not in allowed:
+                raise PermissionError(f"permission mode '{requested}' is not available to you")
+            return requested
+        default = str(self.setting("permission_mode", "default"))
+        return default if default in allowed and default in PERMISSION_MODES else "default"
+
+    def _max_turns(self) -> Optional[int]:
+        """``max_turns`` setting; an unusable value means "no limit from us" instead of a 500."""
+        raw = self.setting("max_turns")
+        try:
+            value = int(str(raw).strip()) if raw not in (None, "") else None
+        except ValueError:
+            log.warning(f"Setting max_turns={raw!r} is not a number — ignored.")
+            return None
+        return value if value and 1 <= value <= 1000 else None
+
     async def create_session(self, owner: str, title: Optional[str] = None,
-                             permission_mode: Optional[str] = None) -> dict:
-        mode = permission_mode or str(self.setting("permission_mode", "default"))
-        if mode not in PERMISSION_MODES:
-            mode = "default"
+                             permission_mode: Optional[str] = None, *,
+                             allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
+        await self.require_current_runner()
+        mode = self._start_mode(permission_mode, allowed_modes)
         payload = {
             "user": owner, "title": title or "Neue Unterhaltung", "cwd": "/workspace",
             "permission_mode": mode, "model": self.setting("model") or None,
             "policy": self.guardrail_policy(),
+            "append_system_prompt": self.instructions_text(),
         }
-        max_turns = self.setting("max_turns")
+        max_turns = self._max_turns()
         if max_turns:
-            payload["max_turns"] = int(max_turns)
+            payload["max_turns"] = max_turns
         created = await self.bridge().create_session(payload)
         sid = str(created.get("session_id") or uuid.uuid4())
         now = _utcnow()
@@ -438,71 +613,111 @@ class AiAssistantService:
 
         if self.is_ready:
             await asyncio.to_thread(retry_write, _insert)
-        return self.get_session(sid) or {"id": sid, "owner": owner, "title": payload["title"], "status": "idle"}
+        # sync SQLAlchemy/pymysql: never on the loop (a hung DB would stall the runner
+        # instance's lease renewals — the 2026-11-11 "No runner online" pattern, AI-09)
+        row = await asyncio.to_thread(self.get_session, sid)
+        return row or {"id": sid, "owner": owner, "title": payload["title"], "status": "idle"}
 
-    async def send_message(self, session_id: str, owner: str, content: str) -> dict:
+    async def send_message(self, session_id: str, owner: str, content: str, *,
+                           allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
         content = (content or "").strip()
         if not content:
             raise ValueError("empty message")
+        await self.require_current_runner()
         now = _utcnow()
 
         def _record_user():
             with get_session() as s:
                 row = s.get(AiSession, session_id)
-                if row is not None:
-                    row.status = "running"
-                    row.last_activity = now
-                    if row.turns == 0 and row.title == "Neue Unterhaltung":
-                        row.title = content[:60] + ("…" if len(content) > 60 else "")
-                s.add(AiMessage(session_id=session_id, role="user", kind="text", content=content, created_at=now))
+                if row is None:
+                    return                       # purged meanwhile: no orphan transcript rows
+                row.status = "running"
+                row.last_activity = now
+                if row.turns == 0 and row.title == "Neue Unterhaltung":
+                    title = redact(content)
+                    row.title = title[:60] + ("…" if len(title) > 60 else "")
+                s.add(AiMessage(session_id=session_id, role="user", kind="text", content=redact(content), created_at=now))
                 s.commit()
 
         if self.is_ready:
             await asyncio.to_thread(retry_write, _record_user)
-        await self._ensure_bridge_session(session_id, owner)
+        await self._ensure_bridge_session(session_id, owner, allowed_modes)
         result = await self.bridge().send_message(session_id, content)
         self._start_recorder(session_id)
         return result or {"accepted": True}
 
-    async def _ensure_bridge_session(self, session_id: str, owner: str) -> None:
+    async def _ensure_bridge_session(self, session_id: str, owner: str,
+                                     allowed_modes: Iterable[str] = SAFE_MODES) -> None:
         """The bridge keeps sessions in memory: after a runner restart (or a core
         restart) the DB row exists but the bridge has never heard of it. Recreate
         it under the same id, resuming the Claude conversation when we know it,
-        and align the recorder's event cursor so old events are not re-recorded."""
+        and align the recorder's event cursor so old events are not re-recorded.
+
+        A session never runs in a mode the caller may not use (AI-02): a stored or live
+        auto/bypassPermissions mode — e.g. from before this check existed, or the caller
+        lost the right since — is reset to ``default``."""
+        allowed = set(allowed_modes)
         bridge = self.bridge()
         try:
             live = await bridge.get_session(session_id)
         except BridgeError as exc:
             if exc.status != 404:
                 raise
-            row = self.get_session(session_id) or {}
-            mode = row.get("permission_mode") or str(self.setting("permission_mode", "default"))
+            row = await asyncio.to_thread(self.get_session, session_id) or {}
+            mode = row.get("permission_mode") or "default"
+            if mode not in allowed or mode not in PERMISSION_MODES:
+                await self._downgrade_mode(session_id, mode, live=False)
+                mode = "default"
             payload = {
-                "session_id": session_id, "user": owner, "title": row.get("title") or "Unterhaltung",
-                "cwd": "/workspace", "permission_mode": mode if mode in PERMISSION_MODES else "default",
+                "session_id": session_id, "user": row.get("owner") or owner, "title": row.get("title") or "Unterhaltung",
+                "cwd": "/workspace", "permission_mode": mode,
                 "model": self.setting("model") or None, "policy": self.guardrail_policy(),
                 "resume": row.get("claude_session_id") or None,
+                "append_system_prompt": self.instructions_text(),
             }
-            max_turns = self.setting("max_turns")
+            max_turns = self._max_turns()
             if max_turns:
-                payload["max_turns"] = int(max_turns)
+                payload["max_turns"] = max_turns
             await bridge.create_session(payload)
             self._seqs.pop(session_id, None)
             log.info(f"Recreated bridge session {session_id[:8]} (resume={'yes' if payload['resume'] else 'no'})")
             return
+        live_mode = (live or {}).get("permission_mode")
+        if live_mode and live_mode not in allowed:
+            await self._downgrade_mode(session_id, str(live_mode), live=True)
         if session_id not in self._seqs:
             self._seqs[session_id] = int((live or {}).get("last_seq") or 0)
 
+    async def _downgrade_mode(self, session_id: str, mode: str, *, live: bool) -> None:
+        log.warning(f"Session {session_id[:8]}: mode '{mode}' is not available to the caller — reset to 'default'.")
+        if live:
+            await self.bridge().set_permission_mode(session_id, "default")
+
+        def _tx():
+            with get_session() as s:
+                row = s.get(AiSession, session_id)
+                if row is not None:
+                    row.permission_mode = "default"
+                    s.commit()
+
+        if self.is_ready:
+            await asyncio.to_thread(retry_write, _tx)
+
     async def approve(self, session_id: str, approval_id: str, decision: str,
                       updated_input: dict | None = None, message: str | None = None) -> dict:
+        if decision != "deny":
+            await self.require_current_runner()
         res = await self.bridge().approve(session_id, approval_id, decision, updated_input, message)
         return res or {"ok": True}
 
-    async def set_permission_mode(self, session_id: str, owner: str, mode: str) -> dict:
+    async def set_permission_mode(self, session_id: str, owner: str, mode: str, *,
+                                  allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
         """Switch a session's approval mode (bridge + DB row)."""
         if mode not in PERMISSION_MODES:
             raise ValueError(f"permission_mode must be one of {PERMISSION_MODES}")
-        await self._ensure_bridge_session(session_id, owner)
+        if mode not in set(allowed_modes):
+            raise PermissionError(f"permission mode '{mode}' is not available to you")
+        await self._ensure_bridge_session(session_id, owner, allowed_modes)
         res = await self.bridge().set_permission_mode(session_id, mode)
 
         def _tx():
@@ -539,19 +754,170 @@ class AiAssistantService:
         if self.is_ready:
             await asyncio.to_thread(retry_write, _archive)
 
+    # ------------------------------------------------------------------ retention (AI-12)
+
+    def _delete_sessions(self, session_ids: list[str]) -> int:
+        """Delete the transcript entries (in short committed batches) and then the rows of
+        ``session_ids``. Blocking. Returns the number of transcript entries removed."""
+        removed = 0
+        for sid in session_ids:
+            while True:
+                def _batch() -> int:
+                    with get_session() as s:
+                        ids = s.scalars(select(AiMessage.id).where(AiMessage.session_id == sid).limit(PURGE_BATCH)).all()
+                        if ids:
+                            s.execute(delete(AiMessage).where(AiMessage.id.in_(ids)))
+                            s.commit()
+                        return len(ids)
+
+                n = retry_write(_batch)
+                removed += n
+                if n < PURGE_BATCH:
+                    break
+
+            def _row():
+                with get_session() as s:
+                    s.execute(delete(AiSession).where(AiSession.id == sid))
+                    s.commit()
+
+            retry_write(_row)
+        return removed
+
+    async def purge_session(self, session_id: str) -> dict:
+        """Hard delete of one conversation (owner or admin): the bridge session, every
+        transcript entry and the row. ``DELETE`` without purge only archives."""
+        try:
+            await self.bridge().close_session(session_id)
+        except BridgeError as exc:
+            if exc.status not in (404, 503, 504):
+                raise
+        # Stop the recorder BEFORE deleting: a running turn's recorder would otherwise
+        # write its next entries after the delete (found in review). Late writers are
+        # also refused by _store/_finish once the row is gone.
+        task = self._recorders.pop(session_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.wait({task}, timeout=10)
+        self._seqs.pop(session_id, None)
+        removed = await asyncio.to_thread(self._delete_sessions, [session_id]) if self.is_ready else 0
+        log.info(f"Session {session_id[:8]} purged ({removed} transcript entries).")
+        return {"ok": True, "purged": session_id, "messages": removed}
+
+    def retention_days(self) -> int:
+        try:
+            return max(0, int(str(self.setting("transcript_retention_days", 0)).strip() or 0))
+        except ValueError:
+            return 0
+
+    def prune_transcripts(self, days: Optional[int] = None) -> dict:
+        """Delete conversations inactive for more than ``days`` (setting
+        ``transcript_retention_days``; 0 = keep). Running turns are kept. Blocking."""
+        days = self.retention_days() if days is None else days
+        if days <= 0 or not self.is_ready:
+            return {"ok": True, "sessions": 0, "messages": 0, "retention_days": days}
+        cutoff = _utcnow() - timedelta(days=days)
+        with get_session() as s:
+            ids = [str(x) for x in s.scalars(
+                select(AiSession.id).where(AiSession.last_activity < cutoff,
+                                           AiSession.status.notin_(("running", "waiting_approval")))
+            ).all()]
+        removed = self._delete_sessions(ids)
+        orphans = self._delete_orphan_messages()
+        if ids or orphans:
+            log.info(f"Retention: removed {len(ids)} conversation(s), {removed} transcript entries older than {days} days"
+                     f" and {orphans} orphaned entries.")
+        return {"ok": True, "sessions": len(ids), "messages": removed + orphans, "retention_days": days}
+
+    def _delete_orphan_messages(self) -> int:
+        """Transcript entries whose session row is gone (written by a recorder that
+        outlived a purge before this was fixed). Short committed batches. Blocking."""
+        removed = 0
+        while True:
+            def _batch() -> int:
+                with get_session() as s:
+                    ids = s.scalars(select(AiMessage.id).where(AiMessage.session_id.not_in(select(AiSession.id)))
+                                    .limit(PURGE_BATCH)).all()
+                    if ids:
+                        s.execute(delete(AiMessage).where(AiMessage.id.in_(ids)))
+                        s.commit()
+                    return len(ids)
+
+            n = retry_write(_batch)
+            removed += n
+            if n < PURGE_BATCH:
+                return removed
+
+    async def maybe_prune(self) -> None:
+        """Retention sweep from the runner host's watchdog, at most every few hours."""
+        if self.retention_days() <= 0 or time.monotonic() - self._last_prune < PRUNE_INTERVAL_S:
+            return
+        self._last_prune = time.monotonic()
+        try:
+            await asyncio.to_thread(self.prune_transcripts)
+        except Exception as exc:  # noqa: BLE001 — retried on the next sweep
+            log.warning(f"Retention sweep failed — {exc}")
+
     # ------------------------------------------------------------------ recorder
 
-    def _start_recorder(self, session_id: str) -> None:
+    def _start_recorder(self, session_id: str, *, mid_turn: bool = False) -> None:
         task = self._recorders.get(session_id)
         if task and not task.done():
             return
         create = getattr(self.ctx, "create_task", None) or asyncio.create_task
-        self._recorders[session_id] = create(self._record_turn(session_id), name=f"ai:record:{session_id[:8]}")
+        self._recorders[session_id] = create(self._record_turn(session_id, mid_turn=mid_turn),
+                                             name=f"ai:record:{session_id[:8]}")
 
-    async def _record_turn(self, session_id: str) -> None:
-        """Follow the bridge events of one turn and persist the transcript."""
+    def _busy_session_ids(self) -> list[str]:
+        """Rows a recorder left "running"/"waiting_approval". Blocking."""
+        with get_session() as s:
+            q = select(AiSession.id).where(AiSession.status.in_(("running", "waiting_approval")),
+                                           AiSession.archived.is_(False))
+            return [str(sid) for sid in s.scalars(q).all()]
+
+    async def _reattach_recorders(self) -> None:
+        """A recorder dies with its plugin incarnation (reload, upgrade, core restart)
+        while the turn goes on in the runner. Follow such turns again — from the bridge's
+        current position, so the rest of the turn and the final answer are recorded —
+        and set rows idle whose turn is over or whose bridge session is gone (AI-10)."""
+        if not self.is_ready or self.runner is None or self.runner.client is None:
+            return
+        try:
+            busy = await asyncio.to_thread(self._busy_session_ids)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Recorder re-attach skipped — {exc}")
+            return
+        for sid in busy:
+            task = self._recorders.get(sid)
+            if task is not None and not task.done():
+                continue
+            try:
+                live = await self.bridge().get_session(sid)
+            except BridgeError:
+                live = None
+            if (live or {}).get("status") in ("running", "waiting_approval"):
+                self._seqs[sid] = int((live or {}).get("last_seq") or 0)
+                self._start_recorder(sid, mid_turn=True)
+                log.info(f"Recorder re-attached to the running turn of {sid[:8]}.")
+            else:
+                await self._set_status(sid, "idle")
+
+    async def _abandon(self, session_id: str, text_parts: list[str]) -> None:
+        """The recorder is being cancelled: keep the text streamed so far. The row keeps its
+        status on purpose — the next incarnation's ``_reattach_recorders`` looks for rows
+        still "running"/"waiting_approval" and either follows the turn again or frees the
+        row; marking it idle here hid the turn from it (review of AI-10)."""
+        try:
+            text = "".join(text_parts).strip()
+            if text:
+                await self._store(session_id, "assistant", "text", text[:TRANSCRIPT_MAX_CHARS * 4], None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Recorder for {session_id[:8]}: could not save the interrupted turn — {exc}")
+
+    async def _record_turn(self, session_id: str, *, mid_turn: bool = False) -> None:
+        """Follow the bridge events of one turn and persist the transcript.
+        ``mid_turn``: attached to a turn that is already running (re-attach)."""
         text_parts: list[str] = []
-        running = False       # a turn ends with `result`, or with `status idle` after `running`
+        running = mid_turn    # a turn ends with `result`, or with `status idle` after `running`
         try:
             async for ev in self.bridge().iter_events(session_id, after=self._last_seq(session_id)):
                 kind, data = ev.get("type"), ev.get("data") or {}
@@ -591,6 +957,10 @@ class AiAssistantService:
                     return
             # stream closed by the bridge (session closed / restart) — close the turn
             await self._finish(session_id, text_parts, None)
+        except asyncio.CancelledError:
+            # dispose() on reload/disable cancels this task; CancelledError is no Exception
+            await asyncio.shield(self._abandon(session_id, text_parts))
+            raise
         except Exception as exc:  # noqa: BLE001
             log.warning(f"Recorder for {session_id[:8]} stopped: {exc}")
             await self._set_status(session_id, "idle")
@@ -606,14 +976,18 @@ class AiAssistantService:
         if not self.is_ready:
             return
         now = _utcnow()
-        meta_json = json.loads(json.dumps(meta, default=str)) if meta else None
+        # Token-shaped strings never reach the table (AI-12): tool output of `env`,
+        # `cat .env`, a pasted key … would otherwise stay readable for every admin.
+        meta_json = redact_obj(json.loads(json.dumps(meta, default=str))) if meta else None
+        content = redact(content)
 
         def _tx():
             with get_session() as s:
-                s.add(AiMessage(session_id=session_id, role=role, kind=kind, content=content, meta=meta_json, created_at=now))
                 row = s.get(AiSession, session_id)
-                if row is not None:
-                    row.last_activity = now
+                if row is None:
+                    return                       # purged meanwhile: no orphan transcript rows
+                s.add(AiMessage(session_id=session_id, role=role, kind=kind, content=content, meta=meta_json, created_at=now))
+                row.last_activity = now
                 s.commit()
 
         await asyncio.to_thread(retry_write, _tx)
@@ -643,19 +1017,20 @@ class AiAssistantService:
         def _tx():
             with get_session() as s:
                 row = s.get(AiSession, session_id)
-                if row is not None:
-                    row.status = "idle"
-                    row.turns = (row.turns or 0) + 1
-                    row.last_activity = now
-                    if result:
-                        row.total_cost_usd = float(row.total_cost_usd or 0) + float(result.get("total_cost_usd") or 0)
-                        if result.get("claude_session_id"):
-                            row.claude_session_id = str(result["claude_session_id"])
+                if row is None:
+                    return                       # purged meanwhile: no orphan transcript rows
+                row.status = "idle"
+                row.turns = (row.turns or 0) + 1
+                row.last_activity = now
+                if result:
+                    row.total_cost_usd = float(row.total_cost_usd or 0) + float(result.get("total_cost_usd") or 0)
+                    if result.get("claude_session_id"):
+                        row.claude_session_id = str(result["claude_session_id"])
                 if result:
                     meta = {k: result.get(k) for k in ("subtype", "duration_ms", "total_cost_usd", "num_turns",
                                                        "is_error", "terminal_reason", "stop_reason")}
                     if result.get("result"):            # the CLI's final text (error description on is_error)
-                        meta["result"] = str(result["result"])[:2000]
+                        meta["result"] = redact(str(result["result"])[:2000])
                     s.add(AiMessage(session_id=session_id, role="system", kind="result", content=None,
                                     meta=meta, created_at=now))
                 s.commit()

@@ -24,7 +24,7 @@ from typing import Any
 
 from .claude_provider import Decision, Provider, ProviderSession, SessionSpec, TranslationState, translate, PERMISSION_MODES
 from .config import Settings
-from .events import EventLog, summarise_input, utc_now_iso
+from .events import TRUNCATION_MARK, EventLog, summarise_input, utc_now_iso
 from .policy import Policy, fallback_verdict, render_input
 
 log = logging.getLogger("bridge.sessions")
@@ -201,7 +201,9 @@ class SessionManager:
             # Reopen where the previous process left off.
             spec = SessionSpec(**{**spec.__dict__, "resume": session.claude_session_id})
         session.provider_session = await self._provider.open(
-            spec, approve=lambda name, inp, ctx: self._approve(session, name, inp, ctx)
+            spec,
+            approve=lambda name, inp, ctx: self._approve(session, name, inp, ctx),
+            guard=lambda name, inp: self._guard(session, name, inp),
         )
         session._cost_reported = 0.0
         return session.provider_session
@@ -294,6 +296,20 @@ class SessionManager:
             if not approval.future.done():
                 approval.future.set_result(Decision("deny", message=reason))
 
+    async def _guard(self, session: Session, tool_name: str, tool_input: dict[str, Any]) -> tuple[str | None, str | None]:
+        """PreToolUse hook: deny and ask rules for every call in every mode (AI-07)."""
+        verdict = session.policy.enforced(tool_name, tool_input)
+        if verdict == "deny":
+            session.emit(
+                "permission_resolved",
+                {"approval_id": None, "decision": "deny", "name": tool_name, "auto": True, "by": "policy"},
+            )
+            log.info("tool denied by guardrail", extra={"ctx": {"session_id": session.session_id, "tool": tool_name}})
+            return "deny", "Blocked by the session's guardrails"
+        if verdict == "ask":
+            return "ask", "A guardrail requires an approval for this call"
+        return None, None
+
     async def _approve(
         self, session: Session, tool_name: str, tool_input: dict[str, Any], context: dict[str, Any]
     ) -> Decision:
@@ -329,7 +345,11 @@ class SessionManager:
                 "tool_use_id": approval.tool_use_id,
                 "name": tool_name,
                 "input": approval.input,
+                # the full string the policy matched — the UI shows it, not the 2 KB summary (AI-11)
                 "rendered": render_input(tool_name, tool_input),
+                "input_truncated": any(
+                    isinstance(v, str) and v.endswith(TRUNCATION_MARK) for v in approval.input.values()
+                ),
                 "suggestions": context.get("suggestions") or [],
                 "title": context.get("title"),
                 "display_name": context.get("display_name"),
@@ -350,6 +370,12 @@ class SessionManager:
             if not session.pending and session.status == STATUS_WAITING:
                 session.set_status(STATUS_RUNNING)
 
+        if decision.decision in ("allow", "allow_always") and decision.updated_input is not None:
+            # The approver may hand the CLI an edited input. The PreToolUse hook only saw the
+            # original, and the CLI does not run it again — check the edit here (review of AI-07).
+            if session.policy.enforced(tool_name, decision.updated_input) == "deny":
+                log.info("edited input denied by guardrail", extra={"ctx": {"session_id": session.session_id, "tool": tool_name}})
+                decision = Decision("deny", message="Blocked by the session's guardrails (edited input)")
         if decision.decision == "allow_always":
             session.policy.allow_exact(tool_name, tool_input)
         session.emit(

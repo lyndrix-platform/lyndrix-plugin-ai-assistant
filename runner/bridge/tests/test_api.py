@@ -57,20 +57,24 @@ async def test_auth_required_everywhere(app):
         assert (await anon.get("/auth/status", headers={"X-Bridge-Token": "wrong"})).status_code == 401
 
 
-async def test_health(client, monkeypatch):
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("LYNDRIX_API_URL", raising=False)
-    body = (await client.get("/health")).json()
+async def test_health(settings, provider):
+    """Auth and agent access are read once at start-up (the bridge then scrubs them from
+    its environment, AI-03); the plugin recreates the runner when they change."""
+    import dataclasses
+
+    async def health_of(credential_env=None, agent_env=None):
+        s = dataclasses.replace(settings, credential_env=credential_env or {}, agent_env=agent_env or {})
+        app = create_app(settings=s, provider=provider, auth_flows=AuthFlowManager(None, credential_env=s.credential_env))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://bridge", headers={"X-Bridge-Token": TOKEN}) as c:
+            return (await c.get("/health")).json()
+
+    body = await health_of()
     assert body["status"] == "ok" and body["claude_version"] == "2.1.301" and body["auth"] == "none"
     assert body["sessions"] == 0 and body["lyndrix_api"] is False and body["auth_flow_pending"] is False
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
-    monkeypatch.setenv("LYNDRIX_API_URL", "http://core:8081")
-    monkeypatch.setenv("LYNDRIX_API_KEY", "k")
-    body = (await client.get("/health")).json()
+    body = await health_of({"CLAUDE_CODE_OAUTH_TOKEN": "x"}, {"LYNDRIX_API_URL": "http://core:8081", "LYNDRIX_API_KEY": "k"})
     assert body["auth"] == "oauth" and body["lyndrix_api"] is True
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "y")
-    body = (await client.get("/health")).json()
+    body = await health_of({"CLAUDE_CODE_OAUTH_TOKEN": "x", "ANTHROPIC_API_KEY": "y"})
     assert body["status"] == "degraded" and body["warnings"]
 
 
@@ -191,7 +195,7 @@ async def test_approval_endpoint(http, provider):
     await wait_for(lambda: bool(provider.decisions) and provider.decisions[0].decision == "allow_always")
     assert (await http.post(f"/sessions/{session_id}/approvals/{approval_id}", json={"decision": "allow"})).status_code == 404
     detail = (await http.get(f"/sessions/{session_id}")).json()
-    assert detail["policy"]["allow"] == [{"tool": "Bash", "match": "^ls$"}]
+    assert detail["policy"]["allow"] == [{"tool": "Bash", "match": r"ls\Z", "exact": True}]
 
 
 async def test_auth_status_without_flow(client, monkeypatch):

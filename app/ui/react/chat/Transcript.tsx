@@ -128,6 +128,9 @@ function ApprovalCard({ item, onDecide, canDecide, compact }: {
   const [showInput, setShowInput] = useState(false)
   const decided = item.decision !== null
   const summary = summarizeToolInput(item.name, item.input)
+  // A request whose summary was cut (or that is simply long) can hide its payload past the
+  // first lines: no quick "Always allow" for it.
+  const long = Boolean(item.truncated) || (item.rendered?.length ?? 0) > 2000
   const decisionLabel = (d: string) =>
     d === 'allow' ? t('approval.allowed', { defaultValue: 'allowed' })
     : d === 'allow_always' ? t('approval.alwaysAllowed', { defaultValue: 'always allowed' })
@@ -153,7 +156,17 @@ function ApprovalCard({ item, onDecide, canDecide, compact }: {
           </span>
         )}
       </div>
-      {summary && <div className="lx-mono" style={{ fontSize: '0.74rem', color: 'var(--lx-text)', wordBreak: 'break-word' }}>{summary}</div>}
+      {item.rendered
+        // The whole command/path, scrollable — a padded command used to show only its
+        // benign head plus "… [truncated]" (AI-11).
+        ? <pre className="lx-log-panel lxai-pre" style={{ margin: 0, maxHeight: 240, padding: '0.45rem 0.6rem', fontSize: '0.74rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{item.rendered}</pre>
+        : summary && <div className="lx-mono" style={{ fontSize: '0.74rem', color: 'var(--lx-text)', wordBreak: 'break-word' }}>{summary}</div>}
+      {long && !decided && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.72rem', color: 'var(--lx-state-paused)' }}>
+          <Icon name="warning_amber" size={14} />
+          {t('approval.longInput', { defaultValue: 'Long request — scroll through all of it before you allow it. "Always allow" is off for it.' })}
+        </div>
+      )}
       {item.input !== undefined && (
         <div>
           <button type="button" className="lxai-link" onClick={() => setShowInput((s) => !s)} style={{ fontSize: '0.72rem', color: 'var(--lx-text-muted)', textDecoration: 'none' }}>
@@ -166,8 +179,8 @@ function ApprovalCard({ item, onDecide, canDecide, compact }: {
         <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
           <Button variant="primary" icon="check" label={t('approval.allow', { defaultValue: 'Allow' })} onClick={() => decide('allow')} disabled={!canDecide || busy !== null} busy={busy === 'allow'} />
           <Button variant="danger" icon="block" label={t('approval.deny', { defaultValue: 'Deny' })} onClick={() => decide('deny')} disabled={!canDecide || busy !== null} busy={busy === 'deny'} />
-          <Button icon="done_all" label={t('approval.allowAlways', { defaultValue: 'Always allow' })} onClick={() => decide('allow_always')} disabled={!canDecide || busy !== null} busy={busy === 'allow_always'}
-            title={t('approval.allowAlwaysHint', { defaultValue: 'Allow this tool for the rest of the session without asking again.' })} />
+          <Button icon="done_all" label={t('approval.allowAlways', { defaultValue: 'Always allow' })} onClick={() => decide('allow_always')} disabled={!canDecide || busy !== null || long} busy={busy === 'allow_always'}
+            title={t('approval.allowAlwaysHint', { defaultValue: 'Allow exactly this call for the rest of the session without asking again.' })} />
         </div>
       )}
     </div>

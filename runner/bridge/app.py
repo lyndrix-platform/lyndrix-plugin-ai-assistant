@@ -4,6 +4,10 @@ Auth: every route, ``/health`` included, requires ``X-Bridge-Token`` equal to
 ``LYNDRIX_AI_BRIDGE_TOKEN``. Before a Claude credential exists only ``/health``
 and the ``/auth/*`` login flow are useful; sessions would fail with an ``error``
 event, never crash the process.
+
+Requests from inside the runner container are refused on every route except the
+token-free ``/livez`` (manual liveness checks): the agent shares this network
+namespace, the plugin never does (``bridge.hardening``).
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import stat
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 
@@ -22,6 +27,7 @@ from . import __version__
 from .auth import AuthFlowError, AuthFlowManager, AuthFlowNotFound, AuthFlowNotReady, AuthFlowPending
 from .claude_provider import PERMISSION_MODES, Provider, SessionSpec
 from .config import Settings, detect_auth
+from .hardening import is_local_peer, local_addresses
 from .policy import Policy, PolicyError
 from .sessions import (
     ApprovalAlreadyResolved,
@@ -94,7 +100,50 @@ class AuthResultIn(BaseModel):
     auth_id: str = Field(min_length=1)
 
 
+class LocalPeerGuard:
+    """Pure ASGI middleware (streams pass through untouched): 403 for requests from
+    inside the container, except the liveness probe. Defence in depth — the agent
+    has no bridge token; if one ever leaks, it still cannot use it from in here."""
+
+    OPEN_PATHS = frozenset({"/livez"})
+
+    def __init__(self, app: Any, *, local: frozenset[str], enabled: bool = True) -> None:
+        self.app = app
+        self.local = local
+        self.enabled = enabled
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if self.enabled and scope.get("type") == "http" and scope.get("path") not in self.OPEN_PATHS:
+            client = scope.get("client")
+            if is_local_peer(client[0] if client else None, self.local):
+                response = JSONResponse(status_code=403, content={"detail": "requests from inside the runner are refused"})
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 # -------------------------------------------------------------------- factory
+
+LEGACY_INSTRUCTIONS_MAX = 64 * 1024
+
+
+def legacy_workspace_instructions(cwd: str) -> str | None:
+    """Instructions for a plugin older than 0.4 that sends no ``append_system_prompt``.
+
+    Such plugins relied on the CLI loading ``<cwd>/CLAUDE.md``; this bridge loads no
+    workspace settings any more (AI-04), and an old plugin with the default image
+    ``:latest`` picks this bridge up on its next recreate. Read only the text (never
+    ``.claude/settings.json``), never through a symlink, bounded."""
+    try:
+        fd = os.open(os.path.join(cwd, "CLAUDE.md"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):   # a FIFO/device must not block or leak
+            return None
+        text = fh.read(LEGACY_INSTRUCTIONS_MAX).decode("utf-8", "replace").strip()
+    return text or None
+
 
 
 def create_app(
@@ -108,12 +157,14 @@ def create_app(
 
         provider = ClaudeCodeProvider(settings)
     manager = SessionManager(provider, settings)
-    auth_flows = auth_flows or AuthFlowManager(getattr(provider, "cli_path", None))
+    auth_flows = auth_flows or AuthFlowManager(getattr(provider, "cli_path", None), credential_env=settings.credential_env)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.claude_version = await provider.version()
-        kind, warnings = detect_auth()
+        probe_flags = getattr(provider, "probe_flags", None)
+        cli_flags = await probe_flags() if callable(probe_flags) else frozenset()
+        kind, warnings = detect_auth(settings.credential_env)
         log.info(
             "bridge ready",
             extra={
@@ -124,6 +175,7 @@ def create_app(
                     "auth": kind,
                     "workspace": settings.workspace,
                     "token_configured": bool(settings.bridge_token),
+                    "strict_mcp_config": "--strict-mcp-config" in cli_flags,
                     "warnings": warnings,
                 }
             },
@@ -137,6 +189,11 @@ def create_app(
             await auth_flows.cancel()
 
     app = FastAPI(title="Lyndrix AI runner bridge", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.add_middleware(
+        LocalPeerGuard,
+        local=local_addresses() if settings.reject_local_peers else frozenset(),
+        enabled=settings.reject_local_peers,
+    )
     app.state.settings = settings
     app.state.manager = manager
     app.state.provider = provider
@@ -175,11 +232,17 @@ def create_app(
 
     # --------------------------------------------------------------- health
 
+    @app.get("/livez")
+    async def livez() -> dict[str, str]:
+        """Token-free liveness for manual checks. Says nothing else. The image has no Docker
+        HEALTHCHECK: Docker runs it with the full container env, bridge token included."""
+        return {"status": "ok"}
+
     @app.get("/health", dependencies=guarded)
     async def health() -> dict[str, Any]:
         if app.state.claude_version is None:
             app.state.claude_version = await provider.version()
-        kind, warnings = detect_auth()
+        kind, warnings = detect_auth(settings.credential_env)
         return {
             "status": "ok" if app.state.claude_version and not warnings else "degraded",
             "claude_version": app.state.claude_version,
@@ -188,7 +251,7 @@ def create_app(
             "provider": provider.name,
             "auth": kind,
             "auth_flow_pending": auth_flows.pending is not None,
-            "lyndrix_api": bool(os.environ.get("LYNDRIX_API_URL") and os.environ.get("LYNDRIX_API_KEY")),
+            "lyndrix_api": bool(settings.agent_env.get("LYNDRIX_API_URL") and settings.agent_env.get("LYNDRIX_API_KEY")),
             "workspace": settings.workspace,
             "sessions": len(manager),
             "warnings": warnings,
@@ -232,6 +295,12 @@ def create_app(
         if not os.path.isdir(cwd):
             raise HTTPException(status_code=400, detail=f"cwd is not a directory: {cwd}")
         policy = Policy.from_dict(body.policy.model_dump() if body.policy else None)
+        append = body.append_system_prompt
+        if append is None:
+            append = legacy_workspace_instructions(cwd)
+            if append:
+                log.info("no instructions from the plugin (< 0.4) — using the workspace CLAUDE.md text",
+                         extra={"ctx": {"user": body.user}})
         spec = SessionSpec(
             user=body.user,
             title=body.title,
@@ -239,7 +308,7 @@ def create_app(
             permission_mode=body.permission_mode,
             allowed_tools=list(body.allowed_tools),
             model=body.model,
-            append_system_prompt=body.append_system_prompt,
+            append_system_prompt=append,
             resume=body.resume,
             max_turns=body.max_turns,
         )
@@ -308,5 +377,12 @@ def create_app(
     return app
 
 
-# uvicorn entry point: ``bridge.app:app`` (see bridge/__main__.py)
-app = create_app()
+def __getattr__(name: str) -> Any:
+    """``uvicorn bridge.app:app`` keeps working, but importing this module (tests,
+    ``python -m bridge``) no longer builds an app from the environment as a side
+    effect. The hardened entry point is ``python -m bridge`` (bridge/__main__.py)."""
+    if name == "app":
+        built = create_app()
+        globals()["app"] = built
+        return built
+    raise AttributeError(name)

@@ -31,8 +31,11 @@ Image: `ghcr.io/lyndrix-platform/lyndrix-ai-runner:<VERSION>` (built from this d
    `GET /sessions/{id}/events` (SSE), answer `permission_request` events via
    `POST /sessions/{id}/approvals/{approval_id}`.
 
-Everything the agent should know about Lyndrix goes into `/workspace/CLAUDE.md` (the plugin generates
-it); the bridge loads it through `setting_sources=["project"]`.
+Everything the agent should know about Lyndrix arrives with `POST /sessions` as `append_system_prompt`
+(the plugin renders it). The CLI loads no filesystem settings (`setting_sources=[]`): `/workspace` is
+shared by every user and writable by the agent, so `/workspace/CLAUDE.md` or `.claude/settings.json`
+(hooks, allow rules) written in one session would configure everybody else's. `LYNDRIX_AI_SETTING_SOURCES`
+opts back in for a single-user setup.
 
 ## Environment variables
 
@@ -42,13 +45,14 @@ it); the bridge loads it through `setting_sources=["project"]`.
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of | Long-lived subscription token from the login flow / `claude setup-token`. **Preferred.** |
 | `ANTHROPIC_API_KEY` | one of | Pay-per-token API key. Never set both — Claude Code would bill the API key; `/health` reports `degraded` + a warning if both are present. |
 | `LYNDRIX_AI_MODEL` | no | Default model for new sessions (a session may override it). |
-| `LYNDRIX_API_URL`, `LYNDRIX_API_KEY` | no | Pass-through for the agent's own Lyndrix API access (used per CLAUDE.md). `/health` only reports `lyndrix_api: true`; the key is never printed. |
+| `LYNDRIX_API_URL`, `LYNDRIX_API_KEY` | no | The agent's own Lyndrix API access (see the instructions), handed to each CLI. `/health` only reports `lyndrix_api: true`; the key is never printed. |
 | `LYNDRIX_AI_WORKSPACE` | no | Default `cwd` for sessions (`/workspace`). |
 | `LYNDRIX_AI_BRIDGE_PORT` | no | Listen port (`8765`). |
 | `LYNDRIX_AI_APPROVAL_TIMEOUT_SECONDS` | no | Unanswered approvals are denied after this (`600`). |
 | `LYNDRIX_AI_EVENT_BUFFER` | no | Events kept per session for `?after=` replay (`500`). |
-| `LYNDRIX_AI_SETTING_SOURCES` | no | Claude Code setting sources (`project`). Add `user` to honour `~/.claude/settings.json`. |
+| `LYNDRIX_AI_SETTING_SOURCES` | no | Claude Code setting sources, default none. `project` loads `/workspace/CLAUDE.md` + `.claude/settings.json`, `user` `~/.claude/settings.json` — only for a single-user setup. |
 | `LYNDRIX_AI_CLAUDE_BIN` | no | CLI path (`/usr/local/bin/claude`). |
+| `LYNDRIX_AI_BRIDGE_ALLOW_LOCAL` | no | `1` lets requests from inside the container reach the guarded routes (local development only). |
 | `LYNDRIX_AI_LOG_LEVEL` | no | `INFO`. Logs are JSON lines on stdout. |
 
 Volumes: `/workspace` (the AI workspace repo; owned by whoever cloned it — `git safe.directory=*`
@@ -61,12 +65,33 @@ The container runs as user `agent` (uid/gid `10000`, build args `AGENT_UID`/`AGE
 is the group of the shared Lyndrix storage (`/data/storage`, setgid dirs), so files the agent writes get
 the right group.
 
+### Secrets and the agent (one uid for the bridge and every tool call)
+
+`python -m bridge` reads `LYNDRIX_AI_BRIDGE_TOKEN`, the Claude credential and `LYNDRIX_API_URL/KEY`
+once, removes them from its environment and marks itself non-dumpable (`PR_SET_DUMPABLE 0`). Each
+Claude Code process gets the Claude credential and the agent's Lyndrix account explicitly through the
+SDK's `env` option. The bridge token never reaches a process the bridge starts, and `/proc/1/environ`
+and `mem` of the bridge are closed to the agent. The bridge code under `/opt/bridge` is root-owned.
+Every request from inside the container is refused (403) except the token-free `GET /livez`. The agent
+shares the network namespace, the plugin never does.
+
+Processes started with `docker exec` (and Docker HEALTHCHECKs) get the container's full env, the
+secrets included. So the image has **no HEALTHCHECK**; the plugin's watchdog probes the bridge from
+outside, and the plugin's own `docker exec` (git in the workspace) blanks the secrets. The values also
+show in `docker inspect`, and the core's `docker run -e` puts them on a command line (core follow-up
+AI-13: env-file / secret mount).
+
+Not covered: the Claude credential and the Lyndrix key sit in every CLI process's environment, so every
+session can read them. That needs an auth-injecting proxy and per-user uids (see the plugin's fix report).
+
 ## HTTP contract
 
-All routes require `X-Bridge-Token`. Errors are `{"detail": "...", "kind": "<ExceptionClass>"}`.
+All routes except `GET /livez` require `X-Bridge-Token`, and all of them except `/livez` refuse
+requests from inside the container (`/livez` is for manual checks; the image has no HEALTHCHECK). Errors are `{"detail": "...", "kind": "<ExceptionClass>"}`.
 
 | Route | Purpose |
 |---|---|
+| `GET /livez` | `{status: ok}` — liveness only, no token, the only route answered locally (manual checks) |
 | `GET /health` | `{status: ok\|degraded, claude_version, sdk_version, bridge_version, provider, auth: oauth\|api_key\|none, auth_flow_pending, lyndrix_api, workspace, sessions, warnings[]}` |
 | `POST /auth/start` | Starts `claude setup-token` → `{auth_id, url, expires_in, expires_at}`; 409 while one is pending; 502 if the CLI prints no URL |
 | `POST /auth/submit` `{auth_id, code}` | `{ok: true, token}` **once** (never logged) or `{ok: false, error}`; either way the flow ends |

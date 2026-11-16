@@ -7,6 +7,7 @@ calling user. All blocking work (DB, git, docker) is offloaded.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,13 +16,22 @@ from pydantic import BaseModel, Field
 
 from core.api import ApiIdentity, require_permission
 
+from ..logic.access import ASSISTANT_USERNAME
 from ..logic.bridge import BridgeError
-from ..logic.service import PERMISSION_MODES, ai_service
+from ..logic.service import PERMISSION_MODES, SAFE_MODES, ai_service
 
 PLUGIN_ID = "lyndrix.plugin.ai_assistant"
 PERM_READ = f"plugin:{PLUGIN_ID}:api:read"
 PERM_WRITE = f"plugin:{PLUGIN_ID}:api:write"
 PERM_ADMIN = f"plugin:{PLUGIN_ID}:api:admin"
+# Custom permissions are never satisfied by the global api:read/api:write baseline the
+# core hands every INT_USER, so they gate for real (AI-01). `chat` = run tools in the
+# shared runner (which holds the Claude credential); `agent_vault` = the assistant's
+# own account reads the operator-allowed Vault spaces.
+PERM_CHAT = f"plugin:{PLUGIN_ID}:chat"
+PERM_VAULT = f"plugin:{PLUGIN_ID}:agent_vault"
+# Approval mode "auto" lets unmatched tool calls run without a human (AI-02).
+PERM_AUTO = f"plugin:{PLUGIN_ID}:auto_mode"
 
 
 class SessionCreate(BaseModel):
@@ -54,12 +64,53 @@ def _bridge_http(exc: BridgeError) -> HTTPException:
     return HTTPException(status_code=status, detail=exc.detail, headers=headers)
 
 
+def _is_agent_account(identity: ApiIdentity) -> bool:
+    return (identity.username or "") == ASSISTANT_USERNAME
+
+
+def _is_admin(identity: ApiIdentity) -> bool:
+    """Plugin administrator — always a human. The assistant's own account never counts,
+    whatever roles an operator grants it: its key lives in the runner, where every chat
+    user's tool calls can read it (AI-01)."""
+    return identity.allows(PERM_ADMIN) and not _is_agent_account(identity)
+
+
+def _allowed_modes(identity: ApiIdentity) -> tuple[str, ...]:
+    """Approval modes this caller may start or switch a session to (AI-02): everyone with
+    chat the safe ones, ``auto`` with ``auto_mode``, ``bypassPermissions`` plugin admins."""
+    allowed = set(SAFE_MODES)
+    if identity.allows(PERM_AUTO):
+        allowed.add("auto")
+    if _is_admin(identity):
+        allowed.add("bypassPermissions")
+    return tuple(m for m in PERMISSION_MODES if m in allowed)
+
+
+def require_human(permission: str):
+    """``require_permission`` that also refuses the assistant's own account: the agent
+    must not manage its runner/login or start and approve chat sessions itself."""
+    base = require_permission(permission)
+
+    def dependency(identity: ApiIdentity = Depends(base)) -> ApiIdentity:
+        if _is_agent_account(identity):
+            raise HTTPException(status_code=403, detail="Not available to the assistant's own account")
+        return identity
+
+    return dependency
+
+
+def _sse_error(message: str) -> bytes:
+    """An SSE error frame. Built with json.dumps: a quote or backslash in the message made
+    the f-string frame invalid JSON and the client silently dropped the error."""
+    return f"data: {json.dumps({'seq': 0, 'type': 'error', 'data': {'message': message}})}\n\n".encode()
+
+
 def _owned(session_id: str, identity: ApiIdentity) -> dict:
     """The session, 404 unless it belongs to the caller (admins see every session)."""
     row = ai_service.get_session(session_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    if row["owner"] != identity.username and not identity.allows(PERM_ADMIN):
+    if row["owner"] != identity.username and not _is_admin(identity):
         raise HTTPException(status_code=404, detail="Session not found")
     return row
 
@@ -79,13 +130,21 @@ def build_router() -> APIRouter:
     # ------------------------------------------------------------------ status
 
     @router.get("/status")
-    async def status(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
-        return await ai_service.status()
+    async def status(identity: ApiIdentity = Depends(require_permission(PERM_READ))):
+        out = await ai_service.status()
+        # What this caller may do — display hygiene for the UI, the routes enforce it.
+        out["caller"] = {
+            "can_chat": identity.allows(PERM_CHAT) and not _is_agent_account(identity),
+            "is_admin": _is_admin(identity),
+            "permission_modes": list(_allowed_modes(identity)),
+        }
+        return out
 
     @router.get("/instructions")
     async def instructions(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
-        text = await asyncio.to_thread(ai_service.workspace.read_instructions) if ai_service.workspace else ""
-        return {"markdown": text}
+        """The instructions the agent gets (system prompt), rendered from the core's data —
+        not the workspace's CLAUDE.md, which any chat session can rewrite (AI-04)."""
+        return {"markdown": await asyncio.to_thread(ai_service.instructions_text), "source": "plugin"}
 
     @router.get("/ai/instructions")
     async def ai_instructions(_identity: ApiIdentity = Depends(require_permission(PERM_READ))):
@@ -99,18 +158,18 @@ def build_router() -> APIRouter:
         return {"plugin_id": PLUGIN_ID, "version": PLUGIN_VERSION, "format": "markdown", "markdown": text}
 
     @router.post("/workspace/sync")
-    async def workspace_sync(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def workspace_sync(_identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         await asyncio.to_thread(ai_service.reload_settings)
         return await ai_service.sync_workspace()
 
     @router.post("/runner/restart")
-    async def runner_restart(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def runner_restart(_identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         await asyncio.to_thread(ai_service.reload_settings)
         health = await ai_service.ensure_runner(force=True)
         return {"runner": health}
 
     @router.get("/runner/logs")
-    async def runner_logs(tail: int = 200, _identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def runner_logs(tail: int = 200, _identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         if ai_service.runner is None:
             raise HTTPException(status_code=503, detail="runner not bound")
         return {"logs": await ai_service.runner.logs(tail=max(10, min(tail, 2000)))}
@@ -118,7 +177,7 @@ def build_router() -> APIRouter:
     # ------------------------------------------------------------------ Claude login (OAuth via the CLI)
 
     @router.post("/auth/start")
-    async def auth_start(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def auth_start(_identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         _require_runner()
         try:
             # the CLI needs a moment before it prints the URL (bridge waits up to 45 s)
@@ -127,7 +186,7 @@ def build_router() -> APIRouter:
             raise _bridge_http(exc) from exc
 
     @router.post("/auth/submit", status_code=202)
-    async def auth_submit(payload: AuthSubmit, identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def auth_submit(payload: AuthSubmit, identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         """Hands the code to the CLI and returns at once; the exchange (up to 90 s)
         is followed server-side and the token stored — poll ``/auth/status``
         (``last_result``) instead of keeping one long request open through the proxies."""
@@ -142,7 +201,7 @@ def build_router() -> APIRouter:
         return {"accepted": True, "auth_id": payload.auth_id}
 
     @router.post("/auth/verify")
-    async def auth_verify(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def auth_verify(_identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         """Real check of the configured credential: one tiny headless turn in the runner."""
         _require_runner()
         try:
@@ -151,7 +210,7 @@ def build_router() -> APIRouter:
             raise _bridge_http(exc) from exc
 
     @router.delete("/auth/{auth_id}")
-    async def auth_cancel(auth_id: str, _identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def auth_cancel(auth_id: str, _identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         """Abort a pending login (the CLI process is terminated; a new one can start)."""
         _require_runner()
         try:
@@ -160,7 +219,7 @@ def build_router() -> APIRouter:
             raise _bridge_http(exc) from exc
 
     @router.get("/auth/status")
-    async def auth_status(_identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    async def auth_status(_identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
         if ai_service.runner is None or ai_service.runner.client is None:
             return {"pending": False, "authenticated": ai_service.auth_mode(), "runner": "down",
                     "last_result": ai_service.login_last}
@@ -180,16 +239,22 @@ def build_router() -> APIRouter:
     @router.get("/sessions")
     async def list_sessions(all: bool = False, archived: bool = False,
                             identity: ApiIdentity = Depends(require_permission(PERM_READ))):
-        owner = None if (all and identity.allows(PERM_ADMIN)) else identity.username
+        owner = None if (all and _is_admin(identity)) else identity.username
         return {"sessions": await asyncio.to_thread(ai_service.list_sessions, owner, archived)}
 
     @router.post("/sessions", status_code=201)
-    async def create_session(payload: SessionCreate, identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+    async def create_session(payload: SessionCreate, identity: ApiIdentity = Depends(require_human(PERM_CHAT))):
         _require_runner()
         if payload.permission_mode and payload.permission_mode not in PERMISSION_MODES:
             raise HTTPException(status_code=422, detail=f"permission_mode must be one of {PERMISSION_MODES}")
+        allowed = _allowed_modes(identity)
+        if payload.permission_mode and payload.permission_mode not in allowed:
+            raise HTTPException(status_code=403, detail=f"permission mode '{payload.permission_mode}' is not available to you")
         try:
-            return await ai_service.create_session(identity.username, payload.title, payload.permission_mode)
+            return await ai_service.create_session(identity.username, payload.title, payload.permission_mode,
+                                                   allowed_modes=allowed)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
 
@@ -207,11 +272,12 @@ def build_router() -> APIRouter:
 
     @router.post("/sessions/{session_id}/messages", status_code=202)
     async def send_message(session_id: str, payload: MessageIn,
-                           identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+                           identity: ApiIdentity = Depends(require_human(PERM_CHAT))):
         _require_runner()
         await asyncio.to_thread(_owned, session_id, identity)
         try:
-            return await ai_service.send_message(session_id, identity.username, payload.content)
+            return await ai_service.send_message(session_id, identity.username, payload.content,
+                                                 allowed_modes=_allowed_modes(identity))
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
         except ValueError as exc:
@@ -232,9 +298,9 @@ def build_router() -> APIRouter:
                         break
                     yield chunk
             except BridgeError as exc:
-                yield f'data: {{"seq": 0, "type": "error", "data": {{"message": "{exc.detail}"}}}}\n\n'.encode()
+                yield _sse_error(str(exc.detail))
             except Exception as exc:  # noqa: BLE001 — the client sees a clean end instead of a 500
-                yield f'data: {{"seq": 0, "type": "error", "data": {{"message": "{str(exc)[:200]}"}}}}\n\n'.encode()
+                yield _sse_error(str(exc)[:200])
 
         return StreamingResponse(
             _gen(), media_type="text/event-stream",
@@ -243,7 +309,7 @@ def build_router() -> APIRouter:
 
     @router.post("/sessions/{session_id}/approvals/{approval_id}")
     async def approve(session_id: str, approval_id: str, payload: ApprovalIn,
-                      identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+                      identity: ApiIdentity = Depends(require_human(PERM_CHAT))):
         _require_runner()
         await asyncio.to_thread(_owned, session_id, identity)
         try:
@@ -253,22 +319,29 @@ def build_router() -> APIRouter:
 
     @router.post("/sessions/{session_id}/permission-mode")
     async def set_permission_mode(session_id: str, payload: PermissionModeIn,
-                                  identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+                                  identity: ApiIdentity = Depends(require_human(PERM_CHAT))):
         """Per-session approval switch. ``auto`` allows everything the guardrails do not
-        deny/ask; ``bypassPermissions`` also disables the guardrails and is admin-only."""
+        deny/ask (permission ``auto_mode``); ``bypassPermissions`` also disables the
+        guardrails and is admin-only."""
         _require_runner()
         await asyncio.to_thread(_owned, session_id, identity)
-        if payload.permission_mode == "bypassPermissions" and not identity.allows(PERM_ADMIN):
+        allowed = _allowed_modes(identity)
+        if payload.permission_mode == "bypassPermissions" and not _is_admin(identity):
             raise HTTPException(status_code=403, detail="bypassPermissions disables the guardrails — administrators only")
+        if payload.permission_mode not in allowed:
+            raise HTTPException(status_code=403, detail=f"permission mode '{payload.permission_mode}' needs the auto_mode permission")
         try:
-            return await ai_service.set_permission_mode(session_id, identity.username, payload.permission_mode)
+            return await ai_service.set_permission_mode(session_id, identity.username, payload.permission_mode,
+                                                        allowed_modes=allowed)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.post("/sessions/{session_id}/interrupt")
-    async def interrupt(session_id: str, identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+    async def interrupt(session_id: str, identity: ApiIdentity = Depends(require_human(PERM_CHAT))):
         _require_runner()
         await asyncio.to_thread(_owned, session_id, identity)
         try:
@@ -277,13 +350,28 @@ def build_router() -> APIRouter:
             raise _bridge_http(exc) from exc
 
     @router.delete("/sessions/{session_id}")
-    async def close_session(session_id: str, identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+    async def close_session(session_id: str, purge: bool = False,
+                            identity: ApiIdentity = Depends(require_permission(PERM_WRITE))):
+        """Close and archive; ``?purge=true`` deletes the conversation and its transcript
+        for good (owner or admin, AI-12)."""
         await asyncio.to_thread(_owned, session_id, identity)
         try:
+            if purge:
+                return await ai_service.purge_session(session_id)
             await ai_service.close_session(session_id)
         except BridgeError as exc:
             raise _bridge_http(exc) from exc
         return {"ok": True}
+
+    @router.post("/maintenance/prune")
+    async def prune(_identity: ApiIdentity = Depends(require_human(PERM_ADMIN))):
+        """Settings action: apply ``transcript_retention_days`` now."""
+        res = await asyncio.to_thread(ai_service.prune_transcripts)
+        if not res.get("retention_days"):
+            res["message"] = "Retention is off (transcript_retention_days = 0) — nothing deleted."
+        else:
+            res["message"] = f"{res['sessions']} conversation(s) older than {res['retention_days']} days deleted."
+        return res
 
     # ------------------------------------------------------------------ Vault spaces for the agent
 
@@ -292,10 +380,14 @@ def build_router() -> APIRouter:
         """Spaces the operator allowed (setting ``vault_spaces``) — names only."""
         return {"spaces": ai_service.allowed_vault_spaces()}
 
-    @router.get("/vault/spaces/{space}")
-    async def vault_space(space: str, identity: ApiIdentity = Depends(require_permission(PERM_ADMIN))):
+    # `:path` — spaces are paths below the lyndrix mount ("plugins/<id>"); a plain
+    # {space} never matched one with a slash. Only exact allowlist entries are read.
+    @router.get("/vault/spaces/{space:path}")
+    async def vault_space(space: str, identity: ApiIdentity = Depends(require_permission(PERM_VAULT))):
         """Values of one allowed space. Read by the agent with its own Lyndrix
-        credentials (``PERM_ADMIN`` granted to the assistant user), audited."""
+        credentials (``agent_vault``, granted to the assistant's role — not plugin
+        admin any more), audited. Every chat user can reach these values through the
+        agent, which the setting's description says."""
         try:
             data = await asyncio.to_thread(ai_service.read_vault_space, space)
         except KeyError:

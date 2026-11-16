@@ -38,11 +38,14 @@ RUN python3 -m venv /opt/bridge/venv \
       -r /opt/bridge/requirements.txt -r /opt/bridge/requirements-dev.txt \
  && rm -f /opt/bridge/venv/lib/python3*/site-packages/claude_agent_sdk/_bundled/claude
 
+# The bridge code stays root-owned and read-only for the agent: the bridge and the
+# agent's tools share the uid `agent`, and a bridge the agent could patch would hand
+# it the approvals of every session on the next restart (AI-03).
 COPY pyproject.toml entrypoint.sh VERSION /opt/bridge/
 COPY bridge/ /opt/bridge/bridge/
 RUN chmod 0755 /opt/bridge/entrypoint.sh \
- && chown -R agent:agent /opt/bridge/bridge /opt/bridge/pyproject.toml \
- && chown agent:agent /opt/bridge
+ && chown -R root:root /opt/bridge \
+ && chmod -R go-w /opt/bridge
 
 ENV HOME=/home/agent \
     CLAUDE_CONFIG_DIR=/home/agent/.claude \
@@ -59,7 +62,10 @@ WORKDIR /workspace
 VOLUME ["/workspace"]
 EXPOSE 8765
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD curl -fsS -H "X-Bridge-Token: ${LYNDRIX_AI_BRIDGE_TOKEN}" "http://127.0.0.1:${LYNDRIX_AI_BRIDGE_PORT:-8765}/health" >/dev/null || exit 1
+# No Docker HEALTHCHECK: Docker runs the probe like `docker exec` — as the agent's uid
+# with the full container env, i.e. a dumpable process holding LYNDRIX_AI_BRIDGE_TOKEN
+# every 30 s (the old probe even put it on curl's command line). The plugin's watchdog
+# probes the bridge from outside; /livez stays for manual checks.
+HEALTHCHECK NONE
 
 ENTRYPOINT ["/opt/bridge/entrypoint.sh"]

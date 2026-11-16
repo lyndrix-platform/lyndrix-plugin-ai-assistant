@@ -31,6 +31,7 @@ from claude_agent_sdk import (
     CanUseToolShadowedWarning,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
@@ -57,6 +58,9 @@ log = logging.getLogger("bridge.claude")
 warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
 PERMISSION_MODES = ("default", "acceptEdits", "bypassPermissions", "plan", "auto")
+# MCP servers only from --mcp-config (we pass none): the shared, agent-writable
+# ~/.claude.json can define per-project MCP servers that would start in every session.
+STRICT_MCP_FLAG = "--strict-mcp-config"
 # "auto" is the bridge's own mode: the CLI runs in "default" (so every call still
 # reaches can_use_tool and the deny/ask rules apply) and the fallback for an
 # unmatched call is "allow". Unlike bypassPermissions it never shadows the policy.
@@ -98,6 +102,9 @@ class Decision:
 
 # (tool_name, tool_input, context) -> Decision ; context is a plain dict
 ApprovalCallback = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[Decision]]
+# (tool_name, tool_input) -> ("deny" | "ask" | None, reason): enforced for EVERY tool call
+# through a PreToolUse hook, also where the CLI never consults can_use_tool (AI-07).
+GuardCallback = Callable[[str, dict[str, Any]], Awaitable[tuple[str | None, str | None]]]
 
 
 class ProviderSession(Protocol):
@@ -110,7 +117,9 @@ class ProviderSession(Protocol):
 class Provider(Protocol):
     name: str
 
-    async def open(self, spec: SessionSpec, *, approve: ApprovalCallback) -> ProviderSession: ...
+    async def open(
+        self, spec: SessionSpec, *, approve: ApprovalCallback, guard: GuardCallback | None = None
+    ) -> ProviderSession: ...
     async def version(self) -> str | None: ...
 
 
@@ -292,6 +301,33 @@ def to_permission_result(decision: Decision) -> PermissionResultAllow | Permissi
     return PermissionResultDeny(message=decision.message or "Denied by user")
 
 
+def pre_tool_use_hook(guard: GuardCallback) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """SDK hook callback enforcing the session guard. ``can_use_tool`` only runs when the
+    CLI decides to ask — never in bypassPermissions, never for edits in acceptEdits, never
+    for calls the CLI allows on its own. PreToolUse fires for every call in every mode, so
+    deny rules (and ask rules) hold everywhere. No decision → the CLI's normal flow."""
+
+    async def hook(input_data: Any, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        data = input_data if isinstance(input_data, dict) else {}
+        tool_input = data.get("tool_input")
+        try:
+            verdict, reason = await guard(str(data.get("tool_name") or ""), tool_input if isinstance(tool_input, dict) else {})
+        except Exception as exc:  # noqa: BLE001 — a broken guard must not wave calls through
+            log.exception("guard failed — denying the tool call", extra={"ctx": {"tool": data.get("tool_name")}})
+            verdict, reason = "deny", f"guardrail evaluation failed: {exc.__class__.__name__}"
+        if verdict not in ("deny", "ask"):
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": verdict,
+                "permissionDecisionReason": reason or "Lyndrix session guardrails",
+            }
+        }
+
+    return hook
+
+
 def build_options(
     spec: SessionSpec,
     settings: Settings,
@@ -299,11 +335,18 @@ def build_options(
     can_use_tool: Any,
     cli_path: str | None,
     stderr: Callable[[str], None] | None = None,
+    guard: GuardCallback | None = None,
+    extra_flags: tuple[str, ...] = (),
 ) -> ClaudeAgentOptions:
     """Translate a session spec into SDK options.
 
     ``system_prompt`` must be the ``claude_code`` preset explicitly — the SDK
     sends an *empty* system prompt when the option is left ``None``.
+
+    ``env``: the SDK starts the CLI with ``{**os.environ, **options.env}``. The
+    bridge scrubbed its secrets from ``os.environ`` at start-up, so this is the
+    only way the CLI gets the Claude credential and the agent's Lyndrix account —
+    and the bridge token is in neither (AI-03).
     """
     system_prompt: dict[str, Any] = {"type": "preset", "preset": "claude_code"}
     if spec.append_system_prompt:
@@ -320,6 +363,10 @@ def build_options(
         can_use_tool=can_use_tool,
         include_partial_messages=True,
         cli_path=cli_path,
+        env=settings.cli_env(),
+        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[pre_tool_use_hook(guard)])]} if guard else None,
+        # boolean CLI flags (value None); only flags the installed CLI was seen to support
+        extra_args={flag.lstrip("-"): None for flag in extra_flags},
         # NOT options.user: in 0.2.168 the transport forwards it as a subprocess
         # kwarg ("unexpected kwargs: user"); the bridge tracks the user itself.
         stderr=stderr,
@@ -355,6 +402,23 @@ class ClaudeCodeProvider:
         self._settings = settings
         self.cli_path = settings.claude_bin or shutil.which("claude")
         self.sdk_version = SDK_VERSION
+        self.cli_flags: frozenset[str] = frozenset()
+
+    async def probe_flags(self) -> frozenset[str]:
+        """Long options the installed CLI lists in ``claude --help``. Optional hardening
+        flags are passed only when known: an unknown flag would fail every session."""
+        if not self.cli_path:
+            return frozenset()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.cli_path, "--help", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+        except Exception as exc:  # noqa: BLE001 - optional flags are simply not used
+            log.warning("claude --help failed", extra={"ctx": {"error": str(exc)}})
+            return frozenset()
+        self.cli_flags = frozenset(re.findall(r"--[a-z][a-z0-9-]+", out.decode(errors="ignore")))
+        return self.cli_flags
 
     async def version(self) -> str | None:
         """``claude --version`` → "2.1.301"; ``None`` when the CLI is unusable."""
@@ -374,7 +438,9 @@ class ClaudeCodeProvider:
         match = re.search(r"(\d+\.\d+\.\d+)", out.decode(errors="ignore"))
         return match.group(1) if match else None
 
-    async def open(self, spec: SessionSpec, *, approve: ApprovalCallback) -> ClaudeCodeSession:
+    async def open(
+        self, spec: SessionSpec, *, approve: ApprovalCallback, guard: GuardCallback | None = None
+    ) -> ClaudeCodeSession:
         async def can_use_tool(
             tool_name: str, tool_input: dict[str, Any], context: ToolPermissionContext
         ) -> PermissionResultAllow | PermissionResultDeny:
@@ -385,7 +451,8 @@ class ClaudeCodeProvider:
             log.info("claude stderr", extra={"ctx": {"user": spec.user, "line": line[:500]}})
 
         options = build_options(
-            spec, self._settings, can_use_tool=can_use_tool, cli_path=self.cli_path, stderr=on_stderr
+            spec, self._settings, can_use_tool=can_use_tool, cli_path=self.cli_path, stderr=on_stderr, guard=guard,
+            extra_flags=(STRICT_MCP_FLAG,) if STRICT_MCP_FLAG in self.cli_flags else (),
         )
         client = ClaudeSDKClient(options)
         await client.connect()
