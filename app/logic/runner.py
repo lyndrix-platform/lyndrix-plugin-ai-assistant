@@ -170,7 +170,10 @@ class RunnerManager:
             cmd = ["exec", "-u", f"{AGENT_UID}:{AGENT_GID}", "-w", "/workspace", "-e", "HOME=/home/agent"]
             for key in SECRET_ENV_KEYS:
                 cmd += ["-e", f"{key}="]
-            return _docker(*cmd, CONTAINER_NAME, "git", *args, timeout=timeout)
+            # No fsmonitor/hooks from the agent-writable git config: this also runs outside
+            # any session (status polling), triggered by users without `chat` (D-AI-6).
+            return _docker(*cmd, CONTAINER_NAME, "git", "-c", "core.fsmonitor=false",
+                           "-c", "core.hooksPath=/dev/null", *args, timeout=timeout)
         except (OSError, subprocess.SubprocessError) as exc:   # no docker CLI here, or a timeout
             log.debug(f"Runner: sandbox git unavailable — {exc}")
             return None

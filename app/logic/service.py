@@ -377,6 +377,40 @@ class AiAssistantService:
                 await asyncio.to_thread(self.workspace.scrub_remote_credentials)
             return health
 
+    @staticmethod
+    def _version_tuple(value: Any) -> Optional[tuple[int, ...]]:
+        parts = str(value or "").strip().lstrip("v").split("-", 1)[0].split(".")
+        try:
+            return tuple(int(p) for p in parts) if parts and parts[0] else None
+        except ValueError:
+            return None
+
+    def runner_outdated(self, health: Optional[dict]) -> Optional[str]:
+        """Why the answering bridge is too old for this plugin, else ``None``.
+
+        The plugin pins the runner it was tested with (``RUNNER_VERSION``). When that
+        image cannot be pulled, the previous container keeps running — and an older
+        bridge lacks the isolation this plugin relies on (bridge token outside the agent
+        env, no workspace settings, PreToolUse hook). It answers ``/health`` "ok", so
+        the version is the only signal (D-AI-2). A bridge that reports no parsable
+        version counts as too old; one that does not answer at all is not "outdated"
+        but unavailable (handled elsewhere)."""
+        if not health or health.get("status") not in ("ok", "degraded"):
+            return None
+        have = self._version_tuple(health.get("bridge_version"))
+        need = self._version_tuple(RUNNER_VERSION)
+        if have is not None and need is not None and have >= need:
+            return None
+        return (f"runner bridge {health.get('bridge_version') or 'unknown'} is older than the required "
+                f"{RUNNER_VERSION} — chat is disabled until the runner image {self.runner_image()} is running")
+
+    async def require_current_runner(self) -> None:
+        """Fail closed: no session, message or approval goes to a bridge older than
+        ``RUNNER_VERSION`` (D-AI-2)."""
+        reason = self.runner_outdated(await self.runner_health())
+        if reason:
+            raise BridgeError(503, reason)
+
     async def _runner_watchdog(self, interval: float = 60.0) -> None:
         """Lease holder: bring the runner back when the image appears later, the
         container died or the bridge stopped answering."""
@@ -386,7 +420,11 @@ class AiAssistantService:
                 break
             try:
                 health = await self.runner.health()
-                if health.get("status") in ("not_started", "unreachable", "error"):
+                # Also when the previous ensure could not pull the image (the old container
+                # answers "ok", so only last_error/the bridge version tell) — D-AI-2.
+                if (health.get("status") in ("not_started", "unreachable", "error")
+                        or self.runner_outdated(health)
+                        or getattr(self.runner, "last_error", None)):
                     await self.ensure_runner()
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"Runner watchdog: {exc}")
@@ -422,6 +460,13 @@ class AiAssistantService:
                 task.cancel()
         if not disabling:
             return
+        if self.is_ready:
+            # Keys first: `docker rm -f` may take up to 60 s, core 1.12 waits only its
+            # teardown budget (15 s) — the revocation must not sit behind it (D-AI-5).
+            try:
+                await asyncio.to_thread(revoke_assistant_keys)
+            except Exception as exc:  # noqa: BLE001 — never fail the teardown
+                log.warning(f"Could not revoke the assistant's API keys — {exc}")
         if self.runner is not None:
             await self.runner.remove()
         if self.is_ready:
@@ -431,10 +476,6 @@ class AiAssistantService:
                     await self._set_status(sid, "idle")
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"Could not reset busy sessions — {exc}")
-            try:
-                await asyncio.to_thread(revoke_assistant_keys)
-            except Exception as exc:  # noqa: BLE001 — never fail the teardown
-                log.warning(f"Could not revoke the assistant's API keys — {exc}")
         set_secret = getattr(self.ctx, "set_secret", None)
         if callable(set_secret):
             try:
@@ -461,12 +502,16 @@ class AiAssistantService:
 
     async def status(self) -> dict:
         ws = await asyncio.to_thread(self.workspace.status) if self.workspace else {}
+        runner = await self.runner_health()
+        outdated = self.runner_outdated(runner)
         return {
             "provider": str(self.setting("provider", "claude-code")),
             "auth_mode": self.auth_mode(),
-            "runner": await self.runner_health(),
+            "runner": {**runner, "status": "degraded"} if outdated else runner,
             "runner_host": self.is_runner_host,
-            "runner_error": getattr(self.runner, "last_error", None),
+            "runner_error": outdated or getattr(self.runner, "last_error", None),
+            "runner_outdated": bool(outdated),
+            "runner_required_version": RUNNER_VERSION,
             "workspace": ws,
             "db_ready": self.is_ready,
             "permission_mode": str(self.setting("permission_mode", "default")),
@@ -544,6 +589,7 @@ class AiAssistantService:
     async def create_session(self, owner: str, title: Optional[str] = None,
                              permission_mode: Optional[str] = None, *,
                              allowed_modes: Iterable[str] = SAFE_MODES) -> dict:
+        await self.require_current_runner()
         mode = self._start_mode(permission_mode, allowed_modes)
         payload = {
             "user": owner, "title": title or "Neue Unterhaltung", "cwd": "/workspace",
@@ -577,6 +623,7 @@ class AiAssistantService:
         content = (content or "").strip()
         if not content:
             raise ValueError("empty message")
+        await self.require_current_runner()
         now = _utcnow()
 
         def _record_user():
@@ -658,6 +705,8 @@ class AiAssistantService:
 
     async def approve(self, session_id: str, approval_id: str, decision: str,
                       updated_input: dict | None = None, message: str | None = None) -> dict:
+        if decision != "deny":
+            await self.require_current_runner()
         res = await self.bridge().approve(session_id, approval_id, decision, updated_input, message)
         return res or {"ok": True}
 

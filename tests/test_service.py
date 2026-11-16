@@ -425,6 +425,9 @@ def test_the_next_incarnation_reattaches_to_running_turns_and_frees_dead_ones(db
     class _Runner:
         client = object()
 
+        async def health(self):
+            return {"status": "ok", "bridge_version": service_mod.RUNNER_VERSION}
+
     svc.runner = _Runner()
 
     async def run():
@@ -461,6 +464,9 @@ def test_disable_removes_the_runner_and_revokes_the_agent_keys(db, monkeypatch):
     class _Runner:
         client = object()
 
+        async def health(self):
+            return {"status": "ok", "bridge_version": service_mod.RUNNER_VERSION}
+
         async def remove(self):
             calls.append("rm")
             return True
@@ -484,7 +490,7 @@ def test_disable_removes_the_runner_and_revokes_the_agent_keys(db, monkeypatch):
     with db() as dbs:
         assert dbs.get(AiSession, sid).status == "running"     # the next incarnation re-attaches
     asyncio.run(svc.shutdown(disabling=True))
-    assert calls == ["rm", "revoke"] and ctx.secrets["assistant_api_key"] == ""
+    assert calls == ["revoke", "rm"] and ctx.secrets["assistant_api_key"] == ""
     assert svc.is_runner_host is False
     with db() as dbs:
         assert dbs.get(AiSession, sid).status == "idle"        # its bridge session went with the runner
@@ -634,3 +640,94 @@ def test_a_revoked_agent_key_is_replaced_and_a_new_token_is_announced(db, monkey
     (topic, payload, cluster), = emitted
     assert topic == "plugin:settings_changed" and cluster is True
     assert payload["plugin_id"] == "lyndrix.plugin.ai_assistant" and "sk-ant" not in str(payload)
+
+
+# --- D-AI-2: a bridge older than RUNNER_VERSION is fail-closed -------------------------------
+
+class _VersionedRunner:
+    client = object()
+    last_error = None
+
+    def __init__(self, health):
+        self._health = health
+
+    async def health(self):
+        return self._health
+
+
+@pytest.mark.parametrize("health, outdated", [
+    ({"status": "ok", "bridge_version": "0.1.6"}, True),
+    ({"status": "degraded", "bridge_version": "0.1.6"}, True),
+    ({"status": "ok"}, True),                                   # no version reported: too old
+    ({"status": "ok", "bridge_version": "garbage"}, True),
+    ({"status": "ok", "bridge_version": service_mod.RUNNER_VERSION}, False),
+    ({"status": "ok", "bridge_version": "9.0.0"}, False),
+    ({"status": "ok", "bridge_version": "0.10.0"}, False),      # numeric, not string, comparison
+    ({"status": "unreachable"}, False),                         # not answering = unavailable, not outdated
+    ({"status": "not_started"}, False),
+])
+def test_runner_outdated_compares_the_bridge_version(health, outdated):
+    svc = _svc(_Ctx({}), _FakeBridge())
+    assert bool(svc.runner_outdated(health)) is outdated
+
+
+def test_an_outdated_bridge_gets_no_session_message_or_approval(db):
+    """Plugin 0.4.0 before image 0.2.0: the pull fails, the old container (bridge 0.1.6)
+    keeps answering /health "ok" and chat used to be served by it — without the
+    isolation this plugin relies on."""
+    from ai_plugin.app.logic.bridge import BridgeError
+
+    bridge = _FakeBridge()
+    svc = _svc(_Ctx({}), bridge)
+    svc.runner = _VersionedRunner({"status": "ok", "bridge_version": service_mod.RUNNER_VERSION})
+    sid = asyncio.run(svc.create_session("alice", "x"))["id"]
+
+    svc.runner = _VersionedRunner({"status": "ok", "bridge_version": "0.1.6"})
+    svc._health_cache = None
+    for call in (lambda: svc.create_session("alice", "y"),
+                 lambda: svc.send_message(sid, "alice", "hi"),
+                 lambda: svc.approve(sid, "a1", "allow")):
+        with pytest.raises(BridgeError) as exc:
+            asyncio.run(call())
+        assert exc.value.status == 503 and "0.1.6" in exc.value.detail and service_mod.RUNNER_VERSION in exc.value.detail
+
+    status = asyncio.run(svc.status())
+    assert status["runner_outdated"] is True and status["runner"]["status"] == "degraded"
+    assert "0.1.6" in status["runner_error"]
+
+
+def test_health_reports_an_outdated_runner_as_degraded(db, monkeypatch):
+    from ai_plugin import entrypoint
+
+    svc = _svc(_Ctx({"anthropic_api_key": "dummy-key-not-real"}), _FakeBridge())
+    svc.runner = _VersionedRunner({"status": "ok", "bridge_version": "0.1.6"})
+    monkeypatch.setattr(entrypoint, "ai_service", svc)
+    monkeypatch.setattr(svc, "auth_mode", lambda: "api_key")
+    monkeypatch.setitem(entrypoint.plugin_state, "ready", True)
+    health = asyncio.run(entrypoint.health(None))
+    assert health.status == "degraded" and health.details["reason"] == "runner_outdated"
+
+
+@pytest.mark.parametrize("health, last_error, retried", [
+    ({"status": "ok", "bridge_version": "0.1.6"}, None, True),                         # old bridge answers "ok"
+    ({"status": "ok", "bridge_version": service_mod.RUNNER_VERSION}, "image x not available", True),   # pull failed
+    ({"status": "ok", "bridge_version": service_mod.RUNNER_VERSION}, None, False),
+])
+def test_watchdog_retries_while_the_runner_is_outdated_or_the_pull_failed(monkeypatch, health, last_error, retried):
+    svc = _svc(_Ctx({}), _FakeBridge())
+    svc.runner = _VersionedRunner(health)
+    svc.runner.last_error = last_error
+    svc.is_runner_host = True
+    ensured = []
+
+    async def ensure(**kw):
+        ensured.append(1)
+        svc.is_runner_host = False            # one round
+
+    async def no_prune():
+        svc.is_runner_host = False
+
+    monkeypatch.setattr(svc, "ensure_runner", ensure)
+    monkeypatch.setattr(svc, "maybe_prune", no_prune)
+    asyncio.run(svc._runner_watchdog(interval=0))
+    assert bool(ensured) is retried

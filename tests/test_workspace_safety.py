@@ -174,7 +174,8 @@ def test_sandbox_git_runs_as_the_agent_with_the_container_secrets_blanked(monkey
     assert runner_mod.RunnerManager.sandbox_git("status", "--porcelain").returncode == 0
     args = list(calls[0])
     assert args[:3] == ["exec", "-u", "10000:10000"] and "/workspace" in args
-    assert args[-4:] == [runner_mod.CONTAINER_NAME, "git", "status", "--porcelain"]
+    assert args[-8:] == [runner_mod.CONTAINER_NAME, "git", "-c", "core.fsmonitor=false",
+                         "-c", "core.hooksPath=/dev/null", "status", "--porcelain"]
     blanked = {args[i + 1] for i, a in enumerate(args) if a == "-e"}
     for key in runner_mod.SECRET_ENV_KEYS:
         assert f"{key}=" in blanked                            # set to empty, never inherited

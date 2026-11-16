@@ -8,6 +8,8 @@ Security audit 2026-11. Needs runner image 0.2.0.
 ### Upgrade notes
 - Grant "AI Assistant User" to everyone who should chat (and "Power User" for Auto).
 - Publish runner image 0.2.0 before the plugin release.
+  If the plugin runs first anyway, chat answers 503 and health is `degraded` (`runner_outdated`) until the image
+  is there; the watchdog retries the pull every minute and recreates the runner on its own.
 - Rebuild the React bundle.
 - Recommendation, the owner decides: if a workspace remote was configured, its git token was readable by the agent in
   `.git/config`. The upgrade removes it from there but does not invalidate it.
@@ -35,7 +37,14 @@ Security audit 2026-11. Needs runner image 0.2.0.
   - remote updates are merged inside the runner;
   - no token is stored in `.git/config`, and tokens left there by 0.3.0 clones are removed.
 - Transcripts: token-shaped strings are redacted before they are stored.
-- Disabling the plugin removes the runner container and revokes the agent's API keys.
+- Disabling the plugin revokes the agent's API keys and then removes the runner container (keys first, so a slow
+  `docker rm` cannot push the revocation past the core's teardown budget).
+- **A runner bridge older than the pinned version is refused (fail-closed).** When the image could not be pulled, the
+  previous container kept running and its old bridge answered "ok", so chat was served without the isolation of
+  runner 0.2.0. New sessions, messages and approvals now answer 503, status and health show `runner_outdated`, and the
+  watchdog keeps retrying. The same applies to a `runner_image` set to an older tag.
+- The chat panel is offered only to users with the `chat` permission.
+- Git commands the plugin runs in the workspace ignore `core.fsmonitor` and hooks from the agent-writable git config.
 
 ### Added
 - `DELETE /sessions/{id}?purge=true`.

@@ -43,6 +43,7 @@ manifest = ModuleManifest(
         "id": "chat", "label": "KI-Chat", "icon": "smart_toy",
         "description": "Chat mit dem KI-Assistenten als schwebendes Fenster.",
         "default_size": {"width": 440, "height": 620},
+        "permission": "plugin:lyndrix.plugin.ai_assistant:chat",
     }],
     # Short purpose for the AI index (core API 1.12); the full guide is served live
     # from ai/INSTRUCTIONS.md at /ai/instructions.
@@ -221,6 +222,10 @@ async def health(ctx) -> PluginHealthStatus:
     }
     if ai_service.auth_mode() == "none":
         return PluginHealthStatus(status="degraded", details={**details, "reason": "claude_not_logged_in"}, latency_ms=latency)
+    outdated = ai_service.runner_outdated(runner)
+    if outdated:
+        return PluginHealthStatus(status="degraded", details={**details, "runner": "degraded", "reason": "runner_outdated",
+                                                              "message": outdated}, latency_ms=latency)
     if ai_service.is_runner_host and runner.get("status") not in ("ok", "degraded"):
         return PluginHealthStatus(status="degraded", details={**details, "reason": "runner_unavailable"}, latency_ms=latency)
     return PluginHealthStatus(status="ok", details=details, latency_ms=latency)
