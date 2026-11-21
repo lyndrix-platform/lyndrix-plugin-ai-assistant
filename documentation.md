@@ -21,7 +21,11 @@ Browser ──(SSE/REST)── Core-Instanz mit Rolle `runner` ──(HTTP, X-Br
   Standard-Image ist die mit dem Plugin getestete Runner-Version (`:<runner/VERSION>`), nicht
   `:latest`; ein gespeichertes `:latest` des offiziellen Images gilt als Standard. Vor dem
   Neuanlegen wird das Image gezogen: Scheitert das (Registry weg, falscher Tag), läuft der alte
-  Container weiter. Speicher, CPU und Prozesse begrenzt `docker update` (Settings `runner_memory`
+  Container weiter. **Fail-closed:** Ist die Bridge älter als die gepinnte Runner-Version (Pull
+  gescheitert, alter Container läuft weiter, oder `runner_image` auf einen älteren Tag gesetzt),
+  antworten neue Sessions, Nachrichten und Freigaben mit 503; `/status` und die Health-Prüfung
+  melden `runner_outdated` (`degraded`), und der Watchdog versucht den Pull jede Minute erneut.
+  Das Runner-Image muss deshalb **vor** dem Plugin-Release veröffentlicht sein. Speicher, CPU und Prozesse begrenzt `docker update` (Settings `runner_memory`
   4g, `runner_cpus` 2, `runner_pids_limit` 1024; 0 = aus). Härtung beim Start (`--cap-drop`,
   `no-new-privileges`, read-only, eigenes Netz, `--pull missing`) braucht `docker:spawn`-Optionen
   im Core und ist noch offen.
@@ -130,6 +134,17 @@ das Claude-Credential und die Werte der Vault-Spaces lesen. Daraus folgt:
 - Eine delegierte Identität (Agent handelt mit den Rechten des jeweiligen Nutzers) braucht einen Core
   mit begrenzten gescopten Keys (≥ 1.12.0) und Prozess-Isolation je Nutzer im Runner (eigene uid
   und eigenes `CLAUDE_CONFIG_DIR` je Nutzer). Das ist noch offen.
+
+## Upgrade auf 0.4.x
+
+- Das Recht `chat` (Rolle „AI Assistant User“, für Auto „Power User“) an alle vergeben, die
+  chatten sollen; `api:write` allein genügt nicht mehr. Das Chat-Panel erscheint nur mit `chat`.
+- Runner-Image 0.2.0 vorher veröffentlichen (siehe Fail-closed oben) und das React-Bundle neu bauen.
+- Hatte der Workspace einen Remote, lag dessen Git-Token in `.git/config` für den Agenten lesbar.
+  Das Upgrade entfernt ihn dort (`status.workspace.remote_credentials_removed`), widerruft ihn aber
+  nicht: Der Eigentümer entscheidet über eine Rotation.
+- Vor dem Deinstallieren deaktivieren. `GET /status` liefert zusätzlich `caller`.
+- Mindest-Core bleibt 1.11.0.
 
 ## Verläufe
 

@@ -11,9 +11,11 @@ plugins from their manifests, and its own Lyndrix account for API access.
   base instructions, one file per plugin that declares `ai_instructions`, and operator notes.
 - Login with the Claude subscription happens from the settings page (the CLI's own OAuth
   flow, URL + code), or with an Anthropic API key.
+- Chatting needs the `chat` permission (role "AI Assistant User"); `auto` mode needs `auto_mode`,
+  `bypassPermissions` is admin-only.
 - Guardrails: permission mode (`default` / `acceptEdits` / `plan` / `bypassPermissions`) plus
   allow / ask / deny rules per tool and command pattern.
 
 German operator documentation: [documentation.md](documentation.md). Runner image:
-[runner/README.md](runner/README.md). Requires Lyndrix core ≥ 1.9 (API 1.11: panels,
+[runner/README.md](runner/README.md). Requires Lyndrix core ≥ 1.11 (API 1.11: panels,
 `ai_instructions`, `module_registry`).
