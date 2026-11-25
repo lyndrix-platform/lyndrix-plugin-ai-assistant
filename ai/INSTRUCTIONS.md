@@ -16,6 +16,8 @@ APIs and to let you work in this git workspace.
 ## Guardrails
 - Tool approvals are decided by the operator's policy (allow / ask / deny rules, permission mode);
   an "ask" shows up as an approval card in the chat — wait for it, never work around a deny.
+- If `status` reports `runner_outdated`, the runner image is older than the plugin pins and chat answers 503 until
+  the operator publishes/pulls the pinned image — do not retry in a loop.
 - Sessions, transcripts and approvals are per user; do not assume you see other users' chats.
 - The workspace is the only writable place; `.lyndrix/cache/` holds fetched plugin guides and may be
   deleted at any time.
